@@ -1,41 +1,58 @@
-use parking_lot::RwLock;
-use std::{collections::HashSet, sync::Arc};
+use parking_lot::{RwLock, RwLockWriteGuard};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 use tracing::{info, warn};
 
-use super::socks5::SocksServer;
+use super::socks5::{SocksServer, SocksServerReferrer};
 use crate::cli::CliArgs;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppContext {
     socks5_servers: Arc<RwLock<Vec<Arc<SocksServer>>>>,
+    socks5_referrers: Arc<RwLock<Vec<Arc<SocksServerReferrer>>>>,
+}
+
+fn filter_duplicated_socket_addrs(addrs: &Vec<SocketAddr>) -> HashSet<SocketAddr> {
+    let mut set = HashSet::with_capacity(addrs.len());
+    for addr in addrs {
+        if !set.insert(*addr) {
+            warn!("Ignore duplicated address: {:?}", addr);
+        }
+    }
+    set
 }
 
 impl AppContext {
     pub(crate) fn from_cli_args(args: &CliArgs) -> Self {
-        let mut socks5_udp = HashSet::with_capacity(args.socks5_udp.len());
-        let socks5_servers: Vec<_> = args
-            .socks5_udp
-            .iter()
-            .filter_map(|addr| {
-                if socks5_udp.contains(addr) {
-                    warn!("Duplicated SOCKSv5 UDP server: {:?}", addr);
-                    None
-                } else {
-                    socks5_udp.insert(addr);
-                    Some(SocksServer::new(*addr, None).into())
-                }
-            })
+        let socks5_servers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_udp)
+            .into_iter()
+            .map(|addr| SocksServer::new(addr, None).into())
             .collect();
-        info!("Configured SOCKSv5 servers: {}", socks5_servers.len());
-        if socks5_servers.is_empty() {
+        let socks5_referrers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_tcp)
+            .into_iter()
+            .map(|addr| SocksServerReferrer::new(addr, None).into())
+            .collect();
+        info!(
+            "Configured SOCKSv5 servers: {}",
+            socks5_servers.len() + socks5_referrers.len()
+        );
+        if socks5_servers.is_empty() && socks5_referrers.is_empty() {
             warn!("No proxy server configured");
         }
         Self {
             socks5_servers: RwLock::new(socks5_servers).into(),
+            socks5_referrers: RwLock::new(socks5_referrers).into(),
         }
     }
 
     pub(crate) fn socks5_servers(&self) -> Vec<Arc<SocksServer>> {
         self.socks5_servers.read().clone()
+    }
+
+    pub(crate) fn socks5_referrers(&self) -> Vec<Arc<SocksServerReferrer>> {
+        self.socks5_referrers.read().clone()
+    }
+
+    pub(crate) fn update_socks5_servers(&self) -> RwLockWriteGuard<Vec<Arc<SocksServer>>> {
+        self.socks5_servers.write()
     }
 }

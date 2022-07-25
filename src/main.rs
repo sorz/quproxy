@@ -15,7 +15,10 @@ async fn main() {
     let context = app::AppContext::from_cli_args(&args);
     let checking_service =
         app::CheckingService::new(context.clone(), args.check_interval, args.check_dns_server);
+    let referrer_service =
+        app::SocksReferService::new(context.clone(), args.socks5_tcp_check_interval);
 
+    tokio::spawn(referrer_service.launch());
     //tokio::spawn(checking_service.launch());
     checking_service.launch().await;
 }
