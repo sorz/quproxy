@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
-use std::{future, io, net::SocketAddr, sync::Arc, time::Duration};
+use parking_lot::Mutex;
+use std::{fmt::Debug, future, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::{interval_at, timeout, Instant};
 use tracing::{debug, instrument, trace};
 
@@ -9,15 +10,21 @@ use crate::app::{
     AppContext,
 };
 
+use super::Health;
+
 #[derive(Debug)]
-pub(crate) struct CheckingService {
-    context: AppContext,
+pub(crate) struct CheckingService<S> {
+    context: AppContext<S>,
     check_interval: Duration,
     dns_addr: SocketAddr,
 }
 
-impl CheckingService {
-    pub(crate) fn new(context: AppContext, check_interval: Duration, dns_addr: SocketAddr) -> Self {
+impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S> {
+    pub(crate) fn new(
+        context: AppContext<S>,
+        check_interval: Duration,
+        dns_addr: SocketAddr,
+    ) -> Self {
         Self {
             context,
             check_interval,
@@ -43,7 +50,6 @@ impl CheckingService {
             .socks5_servers()
             .into_iter()
             .map(|server| {
-                println!("server: {:?}", server);
                 Box::pin(async move {
                     let result = server.check_dns_query_delay(self.dns_addr, max_wait).await;
                     (server, result)
@@ -52,8 +58,11 @@ impl CheckingService {
             .collect();
         checkings
             .for_each(|(server, result)| {
-                println!("{}: {:?}ms", server.name, result);
-                // TODO: update delay
+                trace!("{}: {:?}ms", server.name, result);
+                let delay = result.ok().map(|t| t.into());
+                let mut health = server.status.as_ref().lock();
+                health.add_measurement(delay);
+                trace!("{}: avg delay {:?}, {}% loss", server.name, health.average_delay(), health.loss_percent());
                 future::ready(())
             })
             .await;
@@ -62,7 +71,7 @@ impl CheckingService {
 }
 
 #[async_trait]
-trait Checkable: SocksConnect {
+trait Checkable<S: Send + Sync>: SocksConnect<S> {
     #[instrument(skip_all, fields(server=self.server_name(), dns=?dns_addr))]
     async fn check_dns_query_delay(
         &self,
@@ -122,4 +131,4 @@ trait Checkable: SocksConnect {
     }
 }
 
-impl Checkable for Arc<SocksServer> {}
+impl<S: Sync + Send + Debug> Checkable<S> for Arc<SocksServer<S>> {}

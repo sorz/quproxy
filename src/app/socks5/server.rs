@@ -1,4 +1,5 @@
 use std::{
+    hash::{Hash, Hasher},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
@@ -9,18 +10,38 @@ use tokio::{
     net::TcpStream,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SocksServer {
+#[derive(Debug, Clone)]
+pub(crate) struct SocksServer<S> {
     pub(crate) name: String,
     pub(crate) udp_addr: SocketAddr,
+    pub(crate) status: S,
 }
 
-impl SocksServer {
+impl<S: Default> SocksServer<S> {
     pub(crate) fn new(udp_addr: SocketAddr, name: Option<String>) -> Self {
         let name = name.unwrap_or_else(|| udp_addr.to_string());
-        Self { name, udp_addr }
+        Self {
+            name,
+            udp_addr,
+            status: Default::default(),
+        }
     }
 }
+
+impl<S> Hash for SocksServer<S> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.udp_addr.hash(state);
+    }
+}
+
+impl<S> PartialEq for SocksServer<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.udp_addr == other.udp_addr
+    }
+}
+
+impl<S> Eq for SocksServer<S> {}
 
 macro_rules! io_error {
     ($msg:expr) => {
@@ -38,8 +59,8 @@ pub(crate) struct SocksServerReferrer {
 }
 
 #[derive(Debug)]
-pub(crate) struct ReferredSocksServer {
-    pub(crate) server: Arc<SocksServer>,
+pub(crate) struct ReferredSocksServer<S> {
+    pub(crate) server: Arc<SocksServer<S>>,
     pub(crate) stream: TcpStream,
 }
 
@@ -49,7 +70,7 @@ impl SocksServerReferrer {
         Self { name, tcp_addr }
     }
 
-    pub(crate) async fn negotiate(&self) -> io::Result<ReferredSocksServer> {
+    pub(crate) async fn negotiate<S: Default>(&self) -> io::Result<ReferredSocksServer<S>> {
         let mut stream = TcpStream::connect(self.tcp_addr).await?;
         // Send request w/ auth method 0x00 (no auth)
         stream.write_all(&[0x05, 0x01, 0x00]).await?;

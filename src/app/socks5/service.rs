@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -12,14 +12,14 @@ use crate::app::AppContext;
 use super::{server::ReferredSocksServer, SocksServerReferrer};
 
 #[derive(Debug)]
-pub(crate) struct SocksReferService {
-    context: AppContext,
+pub(crate) struct SocksReferService<S> {
+    context: AppContext<S>,
     check_interval: Duration,
-    referred_servers: HashMap<Arc<SocksServerReferrer>, ReferredSocksServer>,
+    referred_servers: HashMap<Arc<SocksServerReferrer>, ReferredSocksServer<S>>,
 }
 
-impl SocksReferService {
-    pub(crate) fn new(context: AppContext, check_interval: Duration) -> Self {
+impl<S: Default> SocksReferService<S> {
+    pub(crate) fn new(context: AppContext<S>, check_interval: Duration) -> Self {
         Self {
             context,
             check_interval,
@@ -58,17 +58,18 @@ impl SocksReferService {
         // Start new connections
         let mut new_servers = HashSet::new();
         for referrer in self.context.socks5_referrers() {
-            if !self.referred_servers.contains_key(&referrer) {
-                match referrer.negotiate().await {
+            if let Entry::Vacant(entry) = self.referred_servers.entry(referrer) {
+                match entry.key().negotiate().await {
                     Ok(referred) => {
                         info!(
                             "Connected with {}, UDP endpoint {:?}",
-                            referrer.name, referred.server.udp_addr
+                            entry.key().name,
+                            referred.server.udp_addr
                         );
                         new_servers.insert(referred.server.clone());
-                        self.referred_servers.insert(referrer, referred);
+                        entry.insert(referred);
                     }
-                    Err(err) => warn!("Failed to negotiate with {}: {}", referrer.name, err),
+                    Err(err) => warn!("Failed to negotiate with {}: {}", entry.key().name, err),
                 }
             }
         }

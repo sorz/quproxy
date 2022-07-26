@@ -12,7 +12,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let context = app::AppContext::from_cli_args(&args);
+    let context: app::AppContext<app::ServerStatus> = app::AppContext::from_cli_args(&args);
     let checking_service =
         app::CheckingService::new(context.clone(), args.check_interval, args.check_dns_server);
     let referrer_service =

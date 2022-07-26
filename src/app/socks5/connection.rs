@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use byteorder::{ReadBytesExt, BE};
 use std::{
+    fmt::Debug,
     io::{Result, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
@@ -14,15 +15,15 @@ const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
 
 #[async_trait]
-pub(crate) trait SocksConnect {
-    async fn connect(&self, target: SocketAddr) -> Result<SocksConnection>;
+pub(crate) trait SocksConnect<S> {
+    async fn connect(&self, target: SocketAddr) -> Result<SocksConnection<S>>;
     fn server_name(&self) -> &str;
 }
 
 #[async_trait]
-impl SocksConnect for Arc<SocksServer> {
+impl<S: Send + Sync + Debug> SocksConnect<S> for Arc<SocksServer<S>> {
     #[instrument]
-    async fn connect(&self, target: SocketAddr) -> Result<SocksConnection> {
+    async fn connect(&self, target: SocketAddr) -> Result<SocksConnection<S>> {
         let bind_ip: IpAddr = match self.udp_addr.ip() {
             IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),
             IpAddr::V6(ip) if ip.is_loopback() => Ipv6Addr::LOCALHOST.into(),
@@ -44,13 +45,13 @@ impl SocksConnect for Arc<SocksServer> {
     }
 }
 
-pub(crate) struct SocksConnection {
-    server: Arc<SocksServer>,
+pub(crate) struct SocksConnection<S> {
+    server: Arc<SocksServer<S>>,
     target: SocketAddr,
     socket: UdpSocket,
 }
 
-impl SocksConnection {
+impl<S> SocksConnection<S> {
     #[instrument(skip_all, fields(buf_len=buf.len()))]
     pub(crate) async fn send_to(&self, buf: &[u8]) -> Result<()> {
         let mut request = Vec::with_capacity(buf.len() + 22);
