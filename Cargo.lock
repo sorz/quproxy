@@ -535,6 +535,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "byteorder",
+ "bytes",
  "clap",
  "futures",
  "libc",

@@ -62,7 +62,12 @@ impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S>
                 let delay = result.ok().map(|t| t.into());
                 let mut health = server.status.as_ref().lock();
                 health.add_measurement(delay);
-                trace!("{}: avg delay {:?}, {}% loss", server.name, health.average_delay(), health.loss_percent());
+                trace!(
+                    "{}: avg delay {:?}, {}% loss",
+                    server.name,
+                    health.average_delay(),
+                    health.loss_percent()
+                );
                 future::ready(())
             })
             .await;
