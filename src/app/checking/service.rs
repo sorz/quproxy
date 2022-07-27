@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use derivative::Derivative;
 use futures::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
 use std::{fmt::Debug, future, io, net::SocketAddr, sync::Arc, time::Duration};
@@ -12,8 +13,9 @@ use crate::app::{
 
 use super::Health;
 
-#[derive(Debug)]
+#[derive(Derivative, Debug)]
 pub(crate) struct CheckingService<S> {
+    #[derivative(Debug = "ignore")]
     context: AppContext<S>,
     check_interval: Duration,
     dns_addr: SocketAddr,

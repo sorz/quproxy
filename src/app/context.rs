@@ -1,23 +1,17 @@
-use parking_lot::{RwLock, RwLockWriteGuard};
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+
+use derivative::Derivative;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use tracing::{info, warn};
 
 use super::socks5::{SocksServer, SocksServerReferrer};
 use crate::cli::CliArgs;
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug, Clone(bound = ""))]
 pub(crate) struct AppContext<Status> {
     socks5_servers: Arc<RwLock<Vec<Arc<SocksServer<Status>>>>>,
     socks5_referrers: Arc<RwLock<Vec<Arc<SocksServerReferrer>>>>,
-}
-
-impl<Status> Clone for AppContext<Status> {
-    fn clone(&self) -> Self {
-        Self {
-            socks5_servers: self.socks5_servers.clone(),
-            socks5_referrers: self.socks5_referrers.clone(),
-        }
-    }
 }
 
 fn filter_duplicated_socket_addrs(addrs: &Vec<SocketAddr>) -> HashSet<SocketAddr> {

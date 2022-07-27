@@ -1,19 +1,23 @@
 use std::{
-    hash::{Hash, Hasher},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
 };
 
+use derivative::Derivative;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Derivative)]
+#[derivative(Debug, Hash, PartialEq, Eq)]
 pub(crate) struct SocksServer<S> {
     pub(crate) name: String,
     pub(crate) udp_addr: SocketAddr,
+
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
     pub(crate) status: S,
 }
 
@@ -27,21 +31,6 @@ impl<S: Default> SocksServer<S> {
         }
     }
 }
-
-impl<S> Hash for SocksServer<S> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.udp_addr.hash(state);
-    }
-}
-
-impl<S> PartialEq for SocksServer<S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.udp_addr == other.udp_addr
-    }
-}
-
-impl<S> Eq for SocksServer<S> {}
 
 macro_rules! io_error {
     ($msg:expr) => {

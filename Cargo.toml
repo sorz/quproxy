@@ -17,6 +17,7 @@ async-trait = "0.1"
 futures  = "0.3"
 
 clap = { version = "3", features = ["derive"] }
+parse_duration = "2"
 
 libc = "0.2"
 nix = "0.24"
@@ -24,8 +25,9 @@ net2 = "0.2"
 socket2 = "0.4"
 
 parking_lot = "0.12"
+derivative="2"
 anyhow = "1"
-parse_duration = "2"
+
 byteorder = "1"
 bytes = "1"
 rand = "0.8"

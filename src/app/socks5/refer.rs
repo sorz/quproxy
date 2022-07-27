@@ -4,14 +4,16 @@ use std::{
     time::Duration,
 };
 
+use derivative::Derivative;
 use tokio::time::{interval_at, Instant};
 use tracing::{debug, info, instrument, trace, warn};
 
 use super::{server::ReferredSocksServer, SocksServerReferrer};
 use crate::app::AppContext;
 
-#[derive(Debug)]
+#[derive(Derivative, Debug)]
 pub(crate) struct SocksReferService<S> {
+    #[derivative(Debug = "ignore")]
     context: AppContext<S>,
     check_interval: Duration,
     referred_servers: HashMap<Arc<SocksServerReferrer>, ReferredSocksServer<S>>,

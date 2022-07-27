@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use byteorder::{ReadBytesExt, BE};
 use bytes::Bytes;
+use derivative::Derivative;
 use futures::Stream;
 use std::{
     fmt::Debug,
@@ -50,19 +51,11 @@ impl<S: Send + Sync + Debug> Bindable<S> for Arc<SocksServer<S>> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug, Clone(bound = ""))]
 pub(crate) struct BindSocks<S> {
     server: Arc<SocksServer<S>>,
     socket: Arc<UdpSocket>,
-}
-
-impl<S> Clone for BindSocks<S> {
-    fn clone(&self) -> Self {
-        Self {
-            server: self.server.clone(),
-            socket: self.socket.clone(),
-        }
-    }
 }
 
 impl<S> BindSocks<S> {
