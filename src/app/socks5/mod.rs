@@ -1,7 +1,9 @@
 mod connection;
+mod forward;
+mod refer;
 mod server;
-mod service;
 
 pub(crate) use connection::SocksConnect;
+pub(crate) use forward::SocksForwardService;
+pub(crate) use refer::SocksReferService;
 pub(crate) use server::{SocksServer, SocksServerReferrer};
-pub(crate) use service::SocksReferService;

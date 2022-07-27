@@ -5,21 +5,23 @@ use std::{
 };
 
 use bytes::Bytes;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use futures::{Stream, StreamExt};
+use tokio_stream::wrappers::ReceiverStream;
 
-use crate::app::AppContext;
-
-use super::{
-    connection::{ConnSocketPair, UdpConnection},
-    socket::AsyncUdpSocket,
+use crate::app::{
+    types::{ClientAddr, RemoteAddr},
+    AppContext,
 };
 
-const CONN_QUEUE_BUF: usize = 8;
+use super::{
+    session::{client_channel, packet_channel, ClientSender, PacketSender},
+    socket::AsyncUdpSocket,
+};
 
 pub(crate) struct TProxyService<S> {
     context: AppContext<S>,
     tproxy_socket: AsyncUdpSocket,
-    alive_conns: HashMap<ConnSocketPair, Sender<Bytes>>,
+    packet_senders: HashMap<ClientAddr, PacketSender>,
 }
 
 impl<S: Sync + Send + 'static> TProxyService<S> {
@@ -28,37 +30,46 @@ impl<S: Sync + Send + 'static> TProxyService<S> {
         Ok(Self {
             context,
             tproxy_socket,
-            alive_conns: Default::default(),
+            packet_senders: Default::default(),
         })
     }
 
-    pub(crate) fn launch(mut self) -> Receiver<UdpConnection> {
-        let (conn_sender, conn_receiver) = mpsc::channel(CONN_QUEUE_BUF);
+    pub(crate) fn launch(
+        mut self,
+    ) -> impl Stream<Item = (ClientAddr, impl Stream<Item = (RemoteAddr, Bytes)>)> {
+        let (sender, receiver) = client_channel();
         tokio::spawn(async move {
             loop {
-                self.serve_once(&conn_sender)
+                self.serve_once(&sender)
                     .await
                     .expect("Error on read TProxy socket");
             }
         });
-        conn_receiver
+        ReceiverStream::new(receiver)
+            .map(|(client, packets)| (client, ReceiverStream::new(packets)))
     }
 
-    async fn serve_once(&mut self, new_conn: &Sender<UdpConnection>) -> io::Result<()> {
+    async fn serve_once(&mut self, new_src: &ClientSender) -> io::Result<()> {
         let mut buf = [0u8; 2048];
-        let (n, socket_pair) = self.tproxy_socket.recv_msg(&mut buf).await?;
-        let entry = self.alive_conns.entry(socket_pair);
+        let (n, src_addr, dst_addr) = self.tproxy_socket.recv_msg(&mut buf).await?;
+        let entry = self.packet_senders.entry(src_addr);
         let sender = match entry {
             Entry::Occupied(ref e) => e.get(),
             Entry::Vacant(e) => {
-                // New connection
-                let (conn, sender) = UdpConnection::new(*e.key());
-                new_conn.send(conn).await.expect("send new connection");
-                e.insert(sender)
+                // New source
+                let (pkt_sender, pkt_receiver) = packet_channel();
+                new_src
+                    .send((*e.key(), pkt_receiver))
+                    .await
+                    .expect("send new connection");
+                e.insert(pkt_sender)
             }
         };
         let pkt = Bytes::copy_from_slice(&buf[..n]);
-        sender.send(pkt).await.expect("TODO: handle droppred conn");
+        sender
+            .send((dst_addr, pkt))
+            .await
+            .expect("TODO: handle droppred conn");
         Ok(())
     }
 }

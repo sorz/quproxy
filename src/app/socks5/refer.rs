@@ -7,9 +7,8 @@ use std::{
 use tokio::time::{interval_at, Instant};
 use tracing::{debug, info, instrument, trace, warn};
 
-use crate::app::AppContext;
-
 use super::{server::ReferredSocksServer, SocksServerReferrer};
+use crate::app::AppContext;
 
 #[derive(Debug)]
 pub(crate) struct SocksReferService<S> {

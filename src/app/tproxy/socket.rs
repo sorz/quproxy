@@ -11,7 +11,7 @@ use nix::errno::Errno;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
 
-use super::connection::ConnSocketPair;
+use crate::app::types::{ClientAddr, RemoteAddr};
 
 pub(crate) struct AsyncUdpSocket {
     inner: AsyncFd<Socket>,
@@ -32,7 +32,10 @@ impl AsyncUdpSocket {
         })
     }
 
-    pub(crate) async fn recv_msg(&self, buf: &mut [u8]) -> io::Result<(usize, ConnSocketPair)> {
+    pub(crate) async fn recv_msg(
+        &self,
+        buf: &mut [u8],
+    ) -> io::Result<(usize, ClientAddr, RemoteAddr)> {
         loop {
             let mut guard = self.inner.readable().await?;
             match guard.try_io(|inner| recv_msg(inner, buf)) {
@@ -43,7 +46,7 @@ impl AsyncUdpSocket {
     }
 }
 
-fn recv_msg<T: AsRawFd>(fd: &T, buf: &mut [u8]) -> io::Result<(usize, ConnSocketPair)> {
+fn recv_msg<T: AsRawFd>(fd: &T, buf: &mut [u8]) -> io::Result<(usize, ClientAddr, RemoteAddr)> {
     let iov = [IoSliceMut::new(buf)];
     let mut ctrl_buf = [0u8; 128];
 
@@ -64,7 +67,7 @@ fn recv_msg<T: AsRawFd>(fd: &T, buf: &mut [u8]) -> io::Result<(usize, ConnSocket
     let src_addr = unsafe { SockAddr::new(src_sockaddr, msghdr.msg_namelen) };
     let dst_addr = parse_dest_addr_from_cmsg(&msghdr)?;
     match (src_addr.as_socket(), dst_addr.as_socket()) {
-        (Some(src), Some(dst)) => Ok((len, (src, dst).into())),
+        (Some(src), Some(dst)) => Ok((len, src.into(), dst.into())),
         _ => Err(io::Error::new(
             ErrorKind::NotFound,
             "missing ip/ip6 address",
