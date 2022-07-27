@@ -12,7 +12,7 @@ use crate::app::{
     AppContext,
 };
 
-use super::connection::{SocksConnect, SocksConnection};
+use super::bind::{BindSocks, Bindable};
 
 pub(crate) struct SocksForwardService<S> {
     context: AppContext<S>,
@@ -43,29 +43,49 @@ impl<S: Default + Send + Sync + Debug> SocksForwardService<S> {
     where
         P: Stream<Item = (RemoteAddr, Bytes)>,
     {
-        //let conn = self.connect_proxy().await?;
-
-        incoming_packet
-            .for_each(|(remote_addr, pkt)| async move {
-                trace!(
-                    "{:?} => {:?}: {} bytes",
-                    client_addr,
+        let proxy = self.select_proxy().await?;
+        let proxy_cloned = proxy.clone();
+        let proxy_ref = &proxy_cloned;
+        let client_to_remote = incoming_packet.for_each(|(remote_addr, pkt)| async move {
+            trace!(
+                "{:?} => {:?}: {} bytes",
+                client_addr,
+                remote_addr,
+                pkt.len()
+            );
+            if let Err(err) = proxy_ref.send_to(remote_addr, &pkt).await {
+                info!(
+                    "failed to forward {} bytes packet to remote {:?}: {}",
+                    pkt.len(),
                     remote_addr,
-                    pkt.len()
+                    err
                 );
-            })
-            .await;
+            }
+        });
+        let remote_to_client = proxy.for_each(|incoming| async move {
+            match incoming {
+                Err(err) => info!("Proxy read error: {}", err),
+                Ok((remote_addr, pkt)) => {
+                    trace!(
+                        "{:?} => {:?}: {} bytes",
+                        remote_addr,
+                        client_addr,
+                        pkt.len()
+                    );
+                }
+            }
+        });
+        futures::future::join(client_to_remote, remote_to_client).await;
         Ok(())
     }
 
-    async fn connect_proxy(&self) -> io::Result<SocksConnection<S>> {
+    async fn select_proxy(&self) -> io::Result<BindSocks<S>> {
         let proxy = self
             .context
             .socks5_servers()
             .first()
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "No avaiable proxy"))?
             .clone();
-        //proxy.connect();
-        todo!("connect to socks")
+        proxy.bind().await
     }
 }

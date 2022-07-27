@@ -6,7 +6,7 @@ use tokio::time::{interval_at, timeout, Instant};
 use tracing::{debug, instrument, trace};
 
 use crate::app::{
-    socks5::{SocksConnect, SocksServer},
+    socks5::{Bindable, SocksServer},
     AppContext,
 };
 
@@ -76,7 +76,7 @@ impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S>
 }
 
 #[async_trait]
-trait Checkable<S: Send + Sync>: SocksConnect<S> {
+trait Checkable<S: Send + Sync>: Bindable<S> {
     #[instrument(skip_all, fields(server=self.server_name(), dns=?dns_addr))]
     async fn check_dns_query_delay(
         &self,
@@ -110,11 +110,11 @@ trait Checkable<S: Send + Sync>: SocksConnect<S> {
         // Send query & receive reply
         let t0 = Instant::now();
         let mut buf = [0u8; 12];
-        let n = timeout(max_wait, async {
-            let conn = self.connect(dns_addr).await?;
+        let (n, _) = timeout(max_wait, async {
+            let proxy = self.bind().await?;
             trace!("Send DNS query: {:?}", query);
-            conn.send_to(&query).await?;
-            conn.recv(&mut buf).await
+            proxy.send_to(dns_addr.into(), &query).await?;
+            proxy.recv_from(&mut buf).await
         })
         .await??;
 
