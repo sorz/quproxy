@@ -54,7 +54,7 @@ impl<S: Send + Sync + Debug> Bindable<S> for Arc<SocksServer<S>> {
 #[derive(Derivative)]
 #[derivative(Debug, Clone(bound = ""))]
 pub(crate) struct BindSocks<S> {
-    server: Arc<SocksServer<S>>,
+    pub(crate) server: Arc<SocksServer<S>>,
     socket: Arc<UdpSocket>,
 }
 

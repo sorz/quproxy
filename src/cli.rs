@@ -50,4 +50,13 @@ pub(crate) struct CliArgs {
     #[clap(long)]
     #[clap(default_value = "info")]
     pub(crate) log_level: LevelFilter,
+
+    /// Max idle time before stop tracking a UDP session
+    #[clap(long, default_value = "90s")]
+    #[clap(parse(try_from_str = parse_duration::parse))]
+    pub(crate) udp_session_timeout: Duration,
+
+    /// Max number of tracked UDP sessions
+    #[clap(long, default_value_t = 512)]
+    pub(crate) udp_max_sessions: usize,
 }

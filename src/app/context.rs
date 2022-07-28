@@ -1,6 +1,7 @@
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use derivative::Derivative;
+use lru_time_cache::LruCache;
 use parking_lot::{RwLock, RwLockWriteGuard};
 use tracing::{info, warn};
 
@@ -10,6 +11,7 @@ use crate::cli::CliArgs;
 #[derive(Derivative)]
 #[derivative(Debug, Clone(bound = ""))]
 pub(crate) struct AppContext<Status> {
+    pub(crate) cli_args: &'static CliArgs,
     socks5_servers: Arc<RwLock<Vec<Arc<SocksServer<Status>>>>>,
     socks5_referrers: Arc<RwLock<Vec<Arc<SocksServerReferrer>>>>,
 }
@@ -25,7 +27,7 @@ fn filter_duplicated_socket_addrs(addrs: &Vec<SocketAddr>) -> HashSet<SocketAddr
 }
 
 impl<Status: Default> AppContext<Status> {
-    pub(crate) fn from_cli_args(args: &CliArgs) -> Self {
+    pub(crate) fn from_cli_args(args: CliArgs) -> Self {
         let socks5_servers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_udp)
             .into_iter()
             .map(|addr| SocksServer::new(addr, None).into())
@@ -42,9 +44,22 @@ impl<Status: Default> AppContext<Status> {
             warn!("No proxy server configured");
         }
         Self {
+            cli_args: Box::leak(args.into()),
             socks5_servers: RwLock::new(socks5_servers).into(),
             socks5_referrers: RwLock::new(socks5_referrers).into(),
         }
+    }
+}
+
+impl<Status> AppContext<Status> {
+    pub(crate) fn new_lru_cache_for_sessions<K, V>(&self) -> LruCache<K, V>
+    where
+        K: Ord + Clone,
+    {
+        LruCache::with_expiry_duration_and_capacity(
+            self.cli_args.udp_session_timeout,
+            self.cli_args.udp_max_sessions,
+        )
     }
 
     pub(crate) fn socks5_servers(&self) -> Vec<Arc<SocksServer<Status>>> {

@@ -1,7 +1,6 @@
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     sync::Arc,
-    time::Duration,
 };
 
 use derivative::Derivative;
@@ -15,21 +14,22 @@ use crate::app::AppContext;
 pub(crate) struct SocksReferService<S> {
     #[derivative(Debug = "ignore")]
     context: AppContext<S>,
-    check_interval: Duration,
     referred_servers: HashMap<Arc<SocksServerReferrer>, ReferredSocksServer<S>>,
 }
 
 impl<S: Default> SocksReferService<S> {
-    pub(crate) fn new(context: AppContext<S>, check_interval: Duration) -> Self {
+    pub(crate) fn new(context: AppContext<S>) -> Self {
         Self {
             context,
-            check_interval,
             referred_servers: Default::default(),
         }
     }
 
     pub(crate) async fn launch(mut self) -> ! {
-        let mut interval = interval_at(Instant::now(), self.check_interval);
+        let mut interval = interval_at(
+            Instant::now(),
+            self.context.cli_args.socks5_tcp_check_interval,
+        );
         loop {
             interval.tick().await;
             self.check_all().await;

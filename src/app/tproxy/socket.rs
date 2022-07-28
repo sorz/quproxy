@@ -18,18 +18,25 @@ pub(crate) struct AsyncUdpSocket {
 }
 
 impl AsyncUdpSocket {
-    pub(crate) fn bind(addr: &SocketAddr) -> io::Result<Self> {
-        let domain = Domain::for_address(*addr);
-        let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-        // Set IP_TRANSPARENT for TPROXY, CAP_NET_ADMIN required.
-        sock.set_ip_transparent(true)?;
-        sock.set_ip_recv_orig_dst_addr(true)?;
-        sock.set_nonblocking(true)?;
-        sock.set_reuse_address(true)?;
+    fn bind(sock: Socket, addr: &SocketAddr) -> io::Result<Self> {
         sock.bind(&(*addr).into())?;
         Ok(Self {
             inner: AsyncFd::new(sock)?,
         })
+    }
+
+    pub(crate) fn bind_tproxy(addr: &SocketAddr) -> io::Result<Self> {
+        let sock = new_socket(addr)?;
+        // Set IP_TRANSPARENT for TPROXY, CAP_NET_ADMIN required.
+        sock.set_ip_transparent(true)?;
+        sock.set_ip_recv_orig_dst_addr(true)?;
+        AsyncUdpSocket::bind(sock, addr)
+    }
+
+    pub(crate) fn bind_nonlocal(addr: &SocketAddr) -> io::Result<Self> {
+        let sock = new_socket(addr)?;
+        sock.set_ip_transparent(true)?;
+        AsyncUdpSocket::bind(sock, addr)
     }
 
     pub(crate) async fn recv_msg(
@@ -39,11 +46,45 @@ impl AsyncUdpSocket {
         loop {
             let mut guard = self.inner.readable().await?;
             match guard.try_io(|inner| recv_msg(inner, buf)) {
-                Ok(result) => return result,
+                Ok(result) => break result,
                 Err(_would_block) => continue,
             }
         }
     }
+
+    pub(crate) async fn send_to(&self, buf: &[u8], target: ClientAddr) -> io::Result<usize> {
+        loop {
+            let mut guard = self.inner.writable().await?;
+            match guard.try_io(|inner| send_to(inner, buf, target.0)) {
+                Ok(result) => break result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+}
+
+fn new_socket(addr: &SocketAddr) -> io::Result<Socket> {
+    let domain = Domain::for_address(*addr);
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_nonblocking(true)?;
+    sock.set_reuse_address(true)?;
+    Ok(sock)
+}
+
+fn send_to<T: AsRawFd>(fd: &T, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
+    let target: SockAddr = target.into();
+    let ret = unsafe {
+        libc::sendto(
+            fd.as_raw_fd(),
+            buf.as_ptr().cast(),
+            buf.len(),
+            0,
+            target.as_ptr(),
+            target.len(),
+        )
+    };
+    let len = Errno::result(ret)? as usize;
+    Ok(len)
 }
 
 fn recv_msg<T: AsRawFd>(fd: &T, buf: &mut [u8]) -> io::Result<(usize, ClientAddr, RemoteAddr)> {

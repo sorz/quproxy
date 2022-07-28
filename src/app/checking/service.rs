@@ -17,26 +17,16 @@ use super::Health;
 pub(crate) struct CheckingService<S> {
     #[derivative(Debug = "ignore")]
     context: AppContext<S>,
-    check_interval: Duration,
-    dns_addr: SocketAddr,
 }
 
 impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S> {
-    pub(crate) fn new(
-        context: AppContext<S>,
-        check_interval: Duration,
-        dns_addr: SocketAddr,
-    ) -> Self {
-        Self {
-            context,
-            check_interval,
-            dns_addr,
-        }
+    pub(crate) fn new(context: AppContext<S>) -> Self {
+        Self { context }
     }
 
     #[instrument(skip_all)]
     pub(crate) async fn launch(self) -> ! {
-        let mut interval = interval_at(Instant::now(), self.check_interval);
+        let mut interval = interval_at(Instant::now(), self.context.cli_args.check_interval);
         loop {
             interval.tick().await;
             self.check_all().await;
@@ -46,14 +36,15 @@ impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S>
     #[instrument(skip_all)]
     async fn check_all(&self) {
         debug!("Start checking all servers");
-        let max_wait = std::cmp::min(Duration::from_secs(4), self.check_interval);
+        let max_wait = std::cmp::min(Duration::from_secs(4), self.context.cli_args.check_interval);
+        let dns_addr = self.context.cli_args.check_dns_server;
         let checkings: FuturesUnordered<_> = self
             .context
             .socks5_servers()
             .into_iter()
             .map(|server| {
                 Box::pin(async move {
-                    let result = server.check_dns_query_delay(self.dns_addr, max_wait).await;
+                    let result = server.check_dns_query_delay(dns_addr, max_wait).await;
                     (server, result)
                 })
             })

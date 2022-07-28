@@ -11,6 +11,7 @@ categories = ["command-line-utilities"]
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1.9"
+tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 async-trait = "0.1"
@@ -31,3 +32,4 @@ anyhow = "1"
 byteorder = "1"
 bytes = "1"
 rand = "0.8"
+lru_time_cache = "0.11"

@@ -9,4 +9,4 @@ pub(crate) use checking::CheckingService;
 pub(crate) use context::AppContext;
 pub(crate) use socks5::{SocksForwardService, SocksReferService};
 pub(crate) use status::ServerStatus;
-pub(crate) use tproxy::TProxyService;
+pub(crate) use tproxy::{TProxyReceiver, TProxySender};
