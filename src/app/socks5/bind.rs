@@ -1,17 +1,23 @@
+use std::{
+    fmt::Debug,
+    future::Future,
+    io::{self, Result, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    pin::Pin,
+    sync::{Arc, Weak},
+    task::{Context, Poll},
+};
+
 use async_trait::async_trait;
 use byteorder::{ReadBytesExt, BE};
 use bytes::Bytes;
 use derivative::Derivative;
-use futures::Stream;
-use std::{
-    fmt::Debug,
-    io::{self, Result, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
+use futures::{FutureExt, Stream};
+use tokio::{
+    io::ReadBuf,
+    net::UdpSocket,
+    sync::Notify,
 };
-use tokio::{io::ReadBuf, net::UdpSocket};
 use tracing::{debug, instrument, trace};
 
 use crate::app::types::RemoteAddr;
@@ -43,6 +49,7 @@ impl<S: Send + Sync + Debug> Bindable<S> for Arc<SocksServer<S>> {
         Ok(BindSocks {
             server: self.clone(),
             socket: socket.into(),
+            drop_notify: Default::default(),
         })
     }
 
@@ -56,6 +63,7 @@ impl<S: Send + Sync + Debug> Bindable<S> for Arc<SocksServer<S>> {
 pub(crate) struct BindSocks<S> {
     pub(crate) server: Arc<SocksServer<S>>,
     socket: Arc<UdpSocket>,
+    drop_notify: Arc<Notify>,
 }
 
 impl<S> BindSocks<S> {
@@ -79,30 +87,6 @@ impl<S> BindSocks<S> {
         Ok(())
     }
 
-    fn decode_packet<'a>(&self, mut pkt: &'a [u8]) -> Option<(&'a [u8], RemoteAddr)> {
-        if pkt.len() < 10 {
-            debug!("UDP request too short");
-            return None;
-        }
-        pkt.read_u16::<BE>().unwrap(); // reversed
-        if pkt.read_u8().unwrap() != 0 {
-            // fragment number
-            debug!("Dropped UDP fragments");
-            return None;
-        }
-        let remote_ip: IpAddr = match pkt.read_u8().unwrap() {
-            ATYP_IPV4 => Ipv4Addr::from(pkt.read_u32::<BE>().unwrap()).into(),
-            ATYP_IPV6 => Ipv6Addr::from(pkt.read_u128::<BE>().unwrap()).into(),
-            _ => {
-                debug!("Unsupported address type");
-                return None;
-            }
-        };
-        let remote: SocketAddr = (remote_ip, pkt.read_u16::<BE>().unwrap()).into();
-        trace!("Remote: {}", remote);
-        Some((pkt, remote.into()))
-    }
-
     #[instrument(skip_all, fields(server=self.server.name))]
     pub(crate) async fn recv_from(&self, mut buf: &mut [u8]) -> Result<(usize, RemoteAddr)> {
         let mut req_buf = vec![0u8; 2048];
@@ -111,26 +95,66 @@ impl<S> BindSocks<S> {
             let n = self.socket.recv(&mut req_buf).await?;
             req_buf.resize(n, 0);
             trace!("Received {} bytes: {:?}", n, req_buf);
-            if let Some((pkt, remote)) = self.decode_packet(&req_buf) {
+            if let Some((pkt, remote)) = decode_packet(&req_buf) {
                 let n = buf.write(pkt)?;
                 return Ok((n, remote));
             }
         }
     }
+
+    pub(super) fn incoming(&self) -> BindSocksIncoming {
+        BindSocksIncoming::new(&self.socket, self.drop_notify.clone())
+    }
 }
 
-impl<S> Stream for BindSocks<S> {
+impl<S> Drop for BindSocks<S> {
+    fn drop(&mut self) {
+        trace!("Drop SOCKS session {:?}", self.socket);
+        self.drop_notify.notify_waiters();
+    }
+}
+
+pub(crate) struct BindSocksIncoming {
+    socket: Weak<UdpSocket>,
+    drop_notify: Pin<Box<dyn Future<Output = ()> + Sync + Send>>,
+}
+
+impl BindSocksIncoming {
+    fn new(socket: &Arc<UdpSocket>, notify: Arc<Notify>) -> Self {
+        Self {
+            socket: Arc::downgrade(socket),
+            drop_notify: Box::pin(wait_notify(notify)),
+        }
+    }
+}
+
+async fn wait_notify(notify: Arc<Notify>) {
+    notify.notified().await
+}
+
+impl Stream for BindSocksIncoming {
     type Item = io::Result<(RemoteAddr, Bytes)>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Poll::Ready(_) = self.drop_notify.poll_unpin(cx) {
+            // Socket dropped, return None to indicate the end of stream
+            return Poll::Ready(None);
+        }
+
+        let socket = match self.socket.upgrade() {
+            Some(socket) => socket,
+            // Socket dropped
+            None => return Poll::Ready(None),
+        };
+
         let mut buf_array = [0u8; 2048];
         let mut buf = ReadBuf::new(&mut buf_array);
         loop {
-            match self.socket.poll_recv(cx, &mut buf) {
+            match socket.poll_recv(cx, &mut buf) {
                 Poll::Pending => break Poll::Pending,
                 Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
                 Poll::Ready(Ok(())) => {
-                    if let Some((pkt, remote)) = self.decode_packet(buf.filled()) {
+                    if let Some((pkt, remote)) = decode_packet(buf.filled()) {
                         break Poll::Ready(Some(Ok((remote, Bytes::copy_from_slice(pkt)))));
                     }
                 }
@@ -138,4 +162,28 @@ impl<S> Stream for BindSocks<S> {
             buf.clear()
         }
     }
+}
+
+fn decode_packet<'a>(mut pkt: &'a [u8]) -> Option<(&'a [u8], RemoteAddr)> {
+    if pkt.len() < 10 {
+        debug!("UDP request too short");
+        return None;
+    }
+    pkt.read_u16::<BE>().unwrap(); // reversed
+    if pkt.read_u8().unwrap() != 0 {
+        // fragment number
+        debug!("Dropped UDP fragments");
+        return None;
+    }
+    let remote_ip: IpAddr = match pkt.read_u8().unwrap() {
+        ATYP_IPV4 => Ipv4Addr::from(pkt.read_u32::<BE>().unwrap()).into(),
+        ATYP_IPV6 => Ipv6Addr::from(pkt.read_u128::<BE>().unwrap()).into(),
+        _ => {
+            debug!("Unsupported address type");
+            return None;
+        }
+    };
+    let remote: SocketAddr = (remote_ip, pkt.read_u16::<BE>().unwrap()).into();
+    trace!("Remote: {}", remote);
+    Some((pkt, remote.into()))
 }

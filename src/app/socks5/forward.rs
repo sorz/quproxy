@@ -106,10 +106,10 @@ where
     I: Sink<UdpPacket> + Send + Sync + 'static,
 {
     let socks = proxy.bind().await?;
-    let mut socks_pin = Box::pin(socks.clone());
+    let mut incoming = Box::pin(socks.incoming());
     let mut sender = Box::pin(sender);
     tokio::spawn(async move {
-        while let Some(result) = socks_pin.next().await {
+        while let Some(result) = incoming.next().await {
             match result {
                 Err(err) => info!("Proxy read error: {}", err),
                 Ok((remote, pkt)) => {
@@ -121,6 +121,7 @@ where
                 }
             }
         }
+        trace!("UDP session for {:?} dropped", client);
     });
     Ok(socks)
 }
