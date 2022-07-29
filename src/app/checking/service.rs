@@ -20,12 +20,15 @@ pub(crate) struct CheckingService<S> {
 }
 
 impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S> {
-    pub(crate) fn new(context: AppContext<S>) -> Self {
-        Self { context }
+    pub(crate) fn new(context: &AppContext<S>) -> Self {
+        Self {
+            context: context.clone(),
+        }
     }
 
     #[instrument(skip_all)]
     pub(crate) async fn launch(self) -> ! {
+        debug!("Checking service started");
         let mut interval = interval_at(Instant::now(), self.context.cli_args.check_interval);
         loop {
             interval.tick().await;
@@ -35,7 +38,7 @@ impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S>
 
     #[instrument(skip_all)]
     async fn check_all(&self) {
-        debug!("Start checking all servers");
+        trace!("Start checking all servers");
         let max_wait = std::cmp::min(Duration::from_secs(4), self.context.cli_args.check_interval);
         let dns_addr = self.context.cli_args.check_dns_server;
         let checkings: FuturesUnordered<_> = self
@@ -49,10 +52,9 @@ impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S>
                 })
             })
             .collect();
-        checkings
-            .for_each(|(server, result)| {
-                trace!("{}: {:?}ms", server.name, result);
-                let delay = result.ok().map(|t| t.into());
+        let (sum, ok) = checkings
+            .inspect(|(server, result)| {
+                let delay = result.as_ref().ok().map(|t| (*t).into());
                 let mut health = server.status.as_ref().lock();
                 health.add_measurement(delay);
                 trace!(
@@ -61,10 +63,12 @@ impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S>
                     health.average_delay(),
                     health.loss_percent()
                 );
-                future::ready(())
+            })
+            .fold((0usize, 0usize), |(sum, ok), (_, result)| {
+                future::ready((sum + 1, ok + if result.is_ok() { 1 } else { 0 }))
             })
             .await;
-        debug!("Finish checking all servers");
+        debug!("Check done, {}/{} up", ok, sum);
     }
 }
 

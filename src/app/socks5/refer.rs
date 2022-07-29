@@ -18,14 +18,15 @@ pub(crate) struct SocksReferService<S> {
 }
 
 impl<S: Default> SocksReferService<S> {
-    pub(crate) fn new(context: AppContext<S>) -> Self {
+    pub(crate) fn new(context: &AppContext<S>) -> Self {
         Self {
-            context,
+            context: context.clone(),
             referred_servers: Default::default(),
         }
     }
 
     pub(crate) async fn launch(mut self) -> ! {
+        debug!("SOCKS refer service started");
         let mut interval = interval_at(
             Instant::now(),
             self.context.cli_args.socks5_tcp_check_interval,
@@ -38,7 +39,7 @@ impl<S: Default> SocksReferService<S> {
 
     #[instrument(skip_all)]
     async fn check_all(&mut self) {
-        debug!("Start checking all SOCKSv5 server referrers");
+        trace!("Start checking all SOCKSv5 server referrers");
         // Remove dead connections
         let mut dead_referrers = HashSet::new();
         let mut dead_servers = HashSet::new();

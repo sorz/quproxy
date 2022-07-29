@@ -31,6 +31,10 @@ pub(crate) struct CliArgs {
     #[clap(multiple_values = true)]
     pub(crate) socks5_udp: Vec<SocketAddr>,
 
+    /// Disable availability check
+    #[clap(long)]
+    pub(crate) no_check: bool,
+
     /// Period of time to make one availability check  
     #[clap(long, default_value = "30s")]
     #[clap(parse(try_from_str = parse_duration::parse))]

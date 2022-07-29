@@ -13,11 +13,7 @@ use byteorder::{ReadBytesExt, BE};
 use bytes::Bytes;
 use derivative::Derivative;
 use futures::{FutureExt, Stream};
-use tokio::{
-    io::ReadBuf,
-    net::UdpSocket,
-    sync::Notify,
-};
+use tokio::{io::ReadBuf, net::UdpSocket, sync::Notify};
 use tracing::{debug, instrument, trace};
 
 use crate::app::types::RemoteAddr;
@@ -136,7 +132,7 @@ impl Stream for BindSocksIncoming {
     type Item = io::Result<(RemoteAddr, Bytes)>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Poll::Ready(_) = self.drop_notify.poll_unpin(cx) {
+        if self.drop_notify.poll_unpin(cx).is_ready() {
             // Socket dropped, return None to indicate the end of stream
             return Poll::Ready(None);
         }
@@ -164,7 +160,7 @@ impl Stream for BindSocksIncoming {
     }
 }
 
-fn decode_packet<'a>(mut pkt: &'a [u8]) -> Option<(&'a [u8], RemoteAddr)> {
+fn decode_packet(mut pkt: &[u8]) -> Option<(&[u8], RemoteAddr)> {
     if pkt.len() < 10 {
         debug!("UDP request too short");
         return None;
@@ -184,6 +180,5 @@ fn decode_packet<'a>(mut pkt: &'a [u8]) -> Option<(&'a [u8], RemoteAddr)> {
         }
     };
     let remote: SocketAddr = (remote_ip, pkt.read_u16::<BE>().unwrap()).into();
-    trace!("Remote: {}", remote);
     Some((pkt, remote.into()))
 }

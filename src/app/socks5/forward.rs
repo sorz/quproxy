@@ -7,7 +7,8 @@ use std::{
 use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use lru_time_cache::{Entry, LruCache};
-use tracing::{info, instrument, trace, warn};
+use tokio::time::Instant;
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::app::{
     types::{ClientAddr, RemoteAddr, UdpPacket},
@@ -25,15 +26,15 @@ pub(crate) struct SocksForwardService<S, I: Sink<UdpPacket>> {
     sender: I,
 }
 
-impl<
-        S: Default + Send + Sync + Debug + 'static,
-        I: Sink<UdpPacket> + Clone + Send + Sync + 'static,
-    > SocksForwardService<S, I>
+impl<S, I> SocksForwardService<S, I>
+where
+    S: Default + Send + Sync + Debug + 'static,
+    I: Sink<UdpPacket> + Clone + Send + Sync + 'static,
 {
-    pub(crate) fn new(context: AppContext<S>, sender: I) -> Self {
+    pub(crate) fn new(context: &AppContext<S>, sender: I) -> Self {
         Self {
+            context: context.clone(),
             proxies: context.new_lru_cache_for_sessions(),
-            context,
             sender,
         }
     }
@@ -42,13 +43,14 @@ impl<
     where
         R: Stream<Item = UdpPacket>,
     {
+        debug!("SOCKS forward service started");
         let mut receiver = Box::pin(receiver);
         while let Some((client, remote, pkt)) = receiver.next().await {
             if let Err(err) = self.send_packet(client, remote, pkt).await {
                 info!("Error on sending packet to proxy: {}", err);
             }
         }
-        warn!("SocksForwardService exited");
+        warn!("SOCKS forward service exited");
     }
 
     #[instrument(skip_all, fields(src=?src, dst=?dst, pkt_bytes=pkt.len()))]
@@ -109,6 +111,8 @@ where
     let mut incoming = Box::pin(socks.incoming());
     let mut sender = Box::pin(sender);
     tokio::spawn(async move {
+        debug!("Open session {:?} => {}", client, proxy.name);
+        let t0 = Instant::now();
         while let Some(result) = incoming.next().await {
             match result {
                 Err(err) => info!("Proxy read error: {}", err),
@@ -121,7 +125,12 @@ where
                 }
             }
         }
-        trace!("UDP session for {:?} dropped", client);
+        debug!(
+            "Close session {:?} => {}, {:#?}",
+            client,
+            proxy.name,
+            t0.elapsed()
+        );
     });
     Ok(socks)
 }

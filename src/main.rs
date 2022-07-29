@@ -13,18 +13,18 @@ async fn main() {
         .init();
     let context: app::AppContext<app::ServerStatus> = app::AppContext::from_cli_args(args);
 
-    let checking_service = app::CheckingService::new(context.clone());
-    let referrer_service = app::SocksReferService::new(context.clone());
-    tokio::spawn(referrer_service.launch());
-    tokio::spawn(checking_service.launch());
+    tokio::spawn(app::SocksReferService::new(&context).launch());
+    if !context.cli_args.no_check {
+        tokio::spawn(app::CheckingService::new(&context).launch());
+    }
 
     let tproxy_receiver =
-        app::TProxyReceiver::new(context.clone()).expect("Failed to launch TProxy receiver");
-    let tproxy_sender = app::TProxySender::new(context.clone());
+        app::TProxyReceiver::new(&context).expect("Failed to launch TProxy receiver");
+    let tproxy_sender = app::TProxySender::new(&context);
     let receiver = tproxy_receiver.incoming_packets();
     let sender = tproxy_sender.launch();
 
-    app::SocksForwardService::new(context.clone(), sender)
+    app::SocksForwardService::new(&context, sender)
         .serve(receiver)
         .await;
 }

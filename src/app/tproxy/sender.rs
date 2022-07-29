@@ -20,16 +20,15 @@ pub(crate) struct TProxySender<S> {
 }
 
 impl<S: Send + Sync + 'static> TProxySender<S> {
-    pub(crate) fn new(context: AppContext<S>) -> Self {
+    pub(crate) fn new(context: &AppContext<S>) -> Self {
         Self {
+            context: context.clone(),
             sockets: context.new_lru_cache_for_sessions(),
-            context,
         }
     }
 
     pub(crate) fn launch(mut self) -> impl Sink<UdpPacket> + Clone {
         let (sender, mut receiver) = mpsc::channel(32);
-
         tokio::spawn(async move {
             while let Some((client, remote, pkt)) = receiver.recv().await {
                 if let Err(err) = self.send_packet(remote, client, pkt).await {

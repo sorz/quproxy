@@ -16,11 +16,11 @@ pub(crate) struct TProxyReceiver<S> {
 }
 
 impl<S: Sync + Send + 'static> TProxyReceiver<S> {
-    pub(crate) fn new(context: AppContext<S>) -> io::Result<Self> {
+    pub(crate) fn new(context: &AppContext<S>) -> io::Result<Self> {
         let bind_addr = (context.cli_args.host, context.cli_args.port).into();
         let tproxy_socket = AsyncUdpSocket::bind_tproxy(&bind_addr)?;
         Ok(Self {
-            context,
+            context: context.clone(),
             tproxy_socket,
         })
     }
