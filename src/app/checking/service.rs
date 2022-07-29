@@ -108,9 +108,9 @@ trait Checkable<S: Send + Sync>: Bindable<S> {
         let t0 = Instant::now();
         let mut buf = [0u8; 12];
         let (n, _) = timeout(max_wait, async {
-            let proxy = self.bind().await?;
+            let proxy = self.bind(None).await?;
             trace!("Send DNS query: {:?}", query);
-            proxy.send_to(dns_addr.into(), &query).await?;
+            proxy.send_to_remote(dns_addr.into(), &query).await?;
             proxy.recv_from(&mut buf).await
         })
         .await??;

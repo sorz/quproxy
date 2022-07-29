@@ -7,22 +7,18 @@ use std::{
 use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use lru_time_cache::{Entry, LruCache};
-use tokio::time::Instant;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::app::{
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
 
-use super::{
-    bind::{BindSocks, Bindable},
-    SocksServer,
-};
+use super::session::{Bindable, Session};
 
 pub(crate) struct SocksForwardService<S, I: Sink<UdpPacket>> {
     context: AppContext<S>,
-    proxies: LruCache<ClientAddr, BindSocks<S>>,
+    sessions: LruCache<ClientAddr, Arc<Session<S>>>,
     sender: I,
 }
 
@@ -34,7 +30,7 @@ where
     pub(crate) fn new(context: &AppContext<S>, sender: I) -> Self {
         Self {
             context: context.clone(),
-            proxies: context.new_lru_cache_for_sessions(),
+            sessions: context.new_lru_cache_for_sessions(),
             sender,
         }
     }
@@ -53,66 +49,70 @@ where
         warn!("SOCKS forward service exited");
     }
 
-    #[instrument(skip_all, fields(src=?src, dst=?dst, pkt_bytes=pkt.len()))]
     async fn send_packet(
         &mut self,
         src: ClientAddr,
         dst: RemoteAddr,
         pkt: Bytes,
     ) -> io::Result<()> {
-        let proxy = self.select_proxy(src).await?;
+        let session = self.retrive_session(src).await?;
         trace!(
             "{:?} => {:?} via {}: {} bytes",
             src,
             dst,
             pkt.len(),
-            proxy.server.name
+            session.server.name
         );
-        if let Err(err) = proxy.send_to(dst, &pkt).await {
+        if let Err(err) = session.send_to_remote(dst, &pkt).await {
             info!(
                 "failed to forward {} bytes packet to remote {:?} via {}: {}",
                 pkt.len(),
                 dst,
-                proxy.server.name,
+                session.server.name,
                 err
             );
         }
         Ok(())
     }
 
-    async fn select_proxy(&mut self, client: ClientAddr) -> io::Result<&mut BindSocks<S>> {
-        let socks = match self.proxies.entry(client) {
+    async fn retrive_session(&mut self, client: ClientAddr) -> io::Result<&Arc<Session<S>>> {
+        let session = match self.sessions.entry(client) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
+                // Select proxy & create new session
                 let proxy = self
                     .context
                     .socks5_servers()
                     .first()
                     .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "No avaiable proxy"))?
                     .clone();
-                let socks = new_proxy_session(proxy, client, self.sender.clone()).await?;
-                entry.insert(socks)
+                let session: Arc<_> = proxy.bind(Some(client)).await?.into();
+                let session_cloned = session.clone();
+                let sender_cloned = self.sender.clone();
+                tokio::spawn(async move {
+                    session_cloned
+                        .forward_remote_to_client(client, sender_cloned)
+                        .await
+                });
+                entry.insert(session)
             }
         };
-        Ok(socks)
+        Ok(session)
     }
 }
 
-async fn new_proxy_session<S, I>(
-    proxy: Arc<SocksServer<S>>,
-    client: ClientAddr,
-    sender: I,
-) -> io::Result<BindSocks<S>>
+impl<S> Session<S>
 where
     S: Send + Sync + Debug + 'static,
-    I: Sink<UdpPacket> + Send + Sync + 'static,
 {
-    let socks = proxy.bind().await?;
-    let mut incoming = Box::pin(socks.incoming());
-    let mut sender = Box::pin(sender);
-    tokio::spawn(async move {
-        debug!("Open session {:?} => {}", client, proxy.name);
-        let t0 = Instant::now();
+    async fn forward_remote_to_client<I>(self: Arc<Self>, client: ClientAddr, sender: I)
+    where
+        I: Sink<UdpPacket> + Send + Sync + 'static,
+    {
+        let mut incoming = Box::pin(self.incoming());
+        let mut sender = Box::pin(sender);
+        trace!("Start forwarding {} remote to client", self);
+        drop(self); // no strong reference to the session
         while let Some(result) = incoming.next().await {
             match result {
                 Err(err) => info!("Proxy read error: {}", err),
@@ -125,12 +125,6 @@ where
                 }
             }
         }
-        debug!(
-            "Close session {:?} => {}, {:#?}",
-            client,
-            proxy.name,
-            t0.elapsed()
-        );
-    });
-    Ok(socks)
+        trace!("Stop forwarding");
+    }
 }
