@@ -8,18 +8,19 @@ use tokio_util::sync::PollSender;
 use tracing::{info, instrument, trace, warn};
 
 use crate::app::{
+    status::Status,
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
 
 use super::socket::AsyncUdpSocket;
 
-pub(crate) struct TProxySender<S> {
+pub(crate) struct TProxySender<S: Status> {
     context: AppContext<S>,
     sockets: LruCache<RemoteAddr, AsyncUdpSocket>,
 }
 
-impl<S: Send + Sync + 'static> TProxySender<S> {
+impl<S: Status> TProxySender<S> {
     pub(crate) fn new(context: &AppContext<S>) -> Self {
         Self {
             context: context.clone(),

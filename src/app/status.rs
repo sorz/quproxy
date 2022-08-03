@@ -1,6 +1,15 @@
+use std::fmt::Debug;
+
 use parking_lot::Mutex;
 
 use super::checking::Health;
+
+pub(crate) trait Status:
+    Send + Sync + AsRef<Mutex<Health>> + Default + Debug + 'static
+{
+}
+
+impl Status for ServerStatus {}
 
 #[derive(Debug, Default)]
 pub(crate) struct ServerStatus {

@@ -8,16 +8,16 @@ use tokio::time::{interval_at, Instant};
 use tracing::{debug, info, instrument, trace, warn};
 
 use super::{server::ReferredSocksServer, SocksServerReferrer};
-use crate::app::AppContext;
+use crate::app::{status::Status, AppContext};
 
 #[derive(Derivative, Debug)]
-pub(crate) struct SocksReferService<S> {
+pub(crate) struct SocksReferService<S: Status> {
     #[derivative(Debug = "ignore")]
     context: AppContext<S>,
     referred_servers: HashMap<Arc<SocksServerReferrer>, ReferredSocksServer<S>>,
 }
 
-impl<S: Default> SocksReferService<S> {
+impl<S: Status> SocksReferService<S> {
     pub(crate) fn new(context: &AppContext<S>) -> Self {
         Self {
             context: context.clone(),

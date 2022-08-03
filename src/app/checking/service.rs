@@ -1,25 +1,23 @@
 use async_trait::async_trait;
 use derivative::Derivative;
 use futures::stream::{FuturesUnordered, StreamExt};
-use parking_lot::Mutex;
 use std::{fmt::Debug, future, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::{interval_at, timeout, Instant};
 use tracing::{debug, instrument, trace};
 
 use crate::app::{
     socks5::{Bindable, SocksServer},
+    status::Status,
     AppContext,
 };
 
-use super::Health;
-
 #[derive(Derivative, Debug)]
-pub(crate) struct CheckingService<S> {
+pub(crate) struct CheckingService<S: Status> {
     #[derivative(Debug = "ignore")]
     context: AppContext<S>,
 }
 
-impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S> {
+impl<S: Status> CheckingService<S> {
     pub(crate) fn new(context: &AppContext<S>) -> Self {
         Self {
             context: context.clone(),
@@ -73,7 +71,7 @@ impl<S: AsRef<Mutex<Health>> + Default + Debug + Send + Sync> CheckingService<S>
 }
 
 #[async_trait]
-trait Checkable<S: Send + Sync>: Bindable<S> {
+trait Checkable<S: Status>: Bindable<S> {
     #[instrument(skip_all, fields(server=self.server_name(), dns=?dns_addr))]
     async fn check_dns_query_delay(
         &self,
@@ -133,4 +131,4 @@ trait Checkable<S: Send + Sync>: Bindable<S> {
     }
 }
 
-impl<S: Sync + Send + Debug> Checkable<S> for Arc<SocksServer<S>> {}
+impl<S: Status> Checkable<S> for Arc<SocksServer<S>> {}

@@ -10,13 +10,14 @@ use lru_time_cache::{Entry, LruCache};
 use tracing::{debug, info, trace, warn};
 
 use crate::app::{
+    status::Status,
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
 
 use super::session::{Bindable, Session};
 
-pub(crate) struct SocksForwardService<S, I: Sink<UdpPacket>> {
+pub(crate) struct SocksForwardService<S: Status, I: Sink<UdpPacket>> {
     context: AppContext<S>,
     sessions: LruCache<ClientAddr, Arc<Session<S>>>,
     sender: I,
@@ -24,7 +25,7 @@ pub(crate) struct SocksForwardService<S, I: Sink<UdpPacket>> {
 
 impl<S, I> SocksForwardService<S, I>
 where
-    S: Default + Send + Sync + Debug + 'static,
+    S: Status,
     I: Sink<UdpPacket> + Clone + Send + Sync + 'static,
 {
     pub(crate) fn new(context: &AppContext<S>, sender: I) -> Self {
