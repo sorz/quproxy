@@ -8,17 +8,17 @@ use tokio::time::{interval_at, Instant};
 use tracing::{debug, info, instrument, trace, warn};
 
 use super::{server::ReferredSocksServer, SocksServerReferrer};
-use crate::app::{status::Status, AppContext};
+use crate::app::AppContext;
 
 #[derive(Derivative, Debug)]
-pub(crate) struct SocksReferService<S: Status> {
+pub(crate) struct SocksReferService {
     #[derivative(Debug = "ignore")]
-    context: AppContext<S>,
-    referred_servers: HashMap<Arc<SocksServerReferrer>, ReferredSocksServer<S>>,
+    context: AppContext,
+    referred_servers: HashMap<Arc<SocksServerReferrer>, ReferredSocksServer>,
 }
 
-impl<S: Status> SocksReferService<S> {
-    pub(crate) fn new(context: &AppContext<S>) -> Self {
+impl SocksReferService {
+    pub(crate) fn new(context: &AppContext) -> Self {
         Self {
             context: context.clone(),
             referred_servers: Default::default(),
@@ -42,6 +42,7 @@ impl<S: Status> SocksReferService<S> {
         trace!("Start checking all SOCKSv5 server referrers");
         // Remove dead connections
         let mut dead_referrers = HashSet::new();
+        #[allow(clippy::mutable_key_type)]
         let mut dead_servers = HashSet::new();
         for (referrer, referred) in &self.referred_servers {
             trace!("Checking {} ({:?})", referrer.name, referred.stream);
@@ -58,6 +59,7 @@ impl<S: Status> SocksReferService<S> {
             .retain(|key, _| !dead_referrers.contains(key));
 
         // Start new connections
+        #[allow(clippy::mutable_key_type)]
         let mut new_servers = HashSet::new();
         for referrer in self.context.socks5_referrers() {
             if let Entry::Vacant(entry) = self.referred_servers.entry(referrer) {

@@ -10,18 +10,20 @@ use tokio::{
     net::TcpStream,
 };
 
+use crate::app::ServerStatus;
+
 #[derive(Derivative)]
 #[derivative(Debug, Hash, PartialEq, Eq)]
-pub(crate) struct SocksServer<S> {
+pub(crate) struct SocksServer {
     pub(crate) name: String,
     pub(crate) udp_addr: SocketAddr,
 
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
-    pub(crate) status: S,
+    pub(crate) status: ServerStatus,
 }
 
-impl<S: Default> SocksServer<S> {
+impl SocksServer {
     pub(crate) fn new(udp_addr: SocketAddr, name: Option<String>) -> Self {
         let name = name.unwrap_or_else(|| udp_addr.to_string());
         Self {
@@ -48,8 +50,8 @@ pub(crate) struct SocksServerReferrer {
 }
 
 #[derive(Debug)]
-pub(crate) struct ReferredSocksServer<S> {
-    pub(crate) server: Arc<SocksServer<S>>,
+pub(crate) struct ReferredSocksServer {
+    pub(crate) server: Arc<SocksServer>,
     pub(crate) stream: TcpStream,
 }
 
@@ -59,7 +61,7 @@ impl SocksServerReferrer {
         Self { name, tcp_addr }
     }
 
-    pub(crate) async fn negotiate<S: Default>(&self) -> io::Result<ReferredSocksServer<S>> {
+    pub(crate) async fn negotiate(&self) -> io::Result<ReferredSocksServer> {
         let mut stream = TcpStream::connect(self.tcp_addr).await?;
         // Send request w/ auth method 0x00 (no auth)
         stream.write_all(&[0x05, 0x01, 0x00]).await?;

@@ -9,25 +9,23 @@ use lru_time_cache::{Entry, LruCache};
 use tracing::{debug, info, trace, warn};
 
 use crate::app::{
-    status::Status,
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
 
 use super::session::{Bindable, Session};
 
-pub(crate) struct SocksForwardService<S: Status, I: Sink<UdpPacket>> {
-    context: AppContext<S>,
-    sessions: LruCache<ClientAddr, Arc<Session<S>>>,
+pub(crate) struct SocksForwardService<I: Sink<UdpPacket>> {
+    context: AppContext,
+    sessions: LruCache<ClientAddr, Arc<Session>>,
     sender: I,
 }
 
-impl<S, I> SocksForwardService<S, I>
+impl<I> SocksForwardService<I>
 where
-    S: Status,
     I: Sink<UdpPacket> + Clone + Send + Sync + 'static,
 {
-    pub(crate) fn new(context: &AppContext<S>, sender: I) -> Self {
+    pub(crate) fn new(context: &AppContext, sender: I) -> Self {
         Self {
             context: context.clone(),
             sessions: context.new_lru_cache_for_sessions(),
@@ -75,7 +73,7 @@ where
         Ok(())
     }
 
-    async fn retrive_session(&mut self, client: ClientAddr) -> io::Result<&Arc<Session<S>>> {
+    async fn retrive_session(&mut self, client: ClientAddr) -> io::Result<&Arc<Session>> {
         let session = match self.sessions.entry(client) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
@@ -101,7 +99,7 @@ where
     }
 }
 
-impl<S: Status> Session<S> {
+impl Session {
     async fn forward_remote_to_client<I>(self: Arc<Self>, client: ClientAddr, sender: I)
     where
         I: Sink<UdpPacket> + Send + Sync + 'static,

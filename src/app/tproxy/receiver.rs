@@ -6,17 +6,17 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::trace;
 
-use crate::app::{status::Status, types::UdpPacket, AppContext};
+use crate::app::{types::UdpPacket, AppContext};
 
 use super::socket::AsyncUdpSocket;
 
-pub(crate) struct TProxyReceiver<S: Status> {
-    context: AppContext<S>,
+pub(crate) struct TProxyReceiver {
+    context: AppContext,
     tproxy_socket: AsyncUdpSocket,
 }
 
-impl<S: Status> TProxyReceiver<S> {
-    pub(crate) fn new(context: &AppContext<S>) -> io::Result<Self> {
+impl TProxyReceiver {
+    pub(crate) fn new(context: &AppContext) -> io::Result<Self> {
         let bind_addr = (context.cli_args.host, context.cli_args.port).into();
         let tproxy_socket = AsyncUdpSocket::bind_tproxy(&bind_addr)?;
         Ok(Self {

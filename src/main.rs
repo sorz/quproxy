@@ -11,7 +11,7 @@ async fn main() {
         .with(args.log_level)
         .with(tracing_subscriber::fmt::layer())
         .init();
-    let context: app::AppContext<app::ServerStatus> = app::AppContext::from_cli_args(args);
+    let context = app::AppContext::from_cli_args(args);
 
     tokio::spawn(app::SocksReferService::new(&context).launch());
     if !context.cli_args.no_check {

@@ -5,17 +5,14 @@ use lru_time_cache::LruCache;
 use parking_lot::{RwLock, RwLockWriteGuard};
 use tracing::{info, warn};
 
-use super::{
-    socks5::{SocksServer, SocksServerReferrer},
-    status::Status,
-};
+use super::socks5::{SocksServer, SocksServerReferrer};
 use crate::cli::CliArgs;
 
 #[derive(Derivative)]
 #[derivative(Debug, Clone(bound = ""))]
-pub(crate) struct AppContext<S: Status> {
+pub(crate) struct AppContext {
     pub(crate) cli_args: &'static CliArgs,
-    socks5_servers: Arc<RwLock<Vec<Arc<SocksServer<S>>>>>,
+    socks5_servers: Arc<RwLock<Vec<Arc<SocksServer>>>>,
     socks5_referrers: Arc<RwLock<Vec<Arc<SocksServerReferrer>>>>,
 }
 
@@ -29,7 +26,7 @@ fn filter_duplicated_socket_addrs(addrs: &Vec<SocketAddr>) -> HashSet<SocketAddr
     set
 }
 
-impl<S: Status> AppContext<S> {
+impl AppContext {
     pub(crate) fn from_cli_args(args: CliArgs) -> Self {
         let socks5_servers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_udp)
             .into_iter()
@@ -54,7 +51,7 @@ impl<S: Status> AppContext<S> {
     }
 }
 
-impl<S: Status> AppContext<S> {
+impl AppContext {
     pub(crate) fn new_lru_cache_for_sessions<K, V>(&self) -> LruCache<K, V>
     where
         K: Ord + Clone,
@@ -65,7 +62,7 @@ impl<S: Status> AppContext<S> {
         )
     }
 
-    pub(crate) fn socks5_servers(&self) -> Vec<Arc<SocksServer<S>>> {
+    pub(crate) fn socks5_servers(&self) -> Vec<Arc<SocksServer>> {
         self.socks5_servers.read().clone()
     }
 
@@ -73,7 +70,7 @@ impl<S: Status> AppContext<S> {
         self.socks5_referrers.read().clone()
     }
 
-    pub(crate) fn update_socks5_servers(&self) -> RwLockWriteGuard<Vec<Arc<SocksServer<S>>>> {
+    pub(crate) fn update_socks5_servers(&self) -> RwLockWriteGuard<Vec<Arc<SocksServer>>> {
         self.socks5_servers.write()
     }
 }
