@@ -5,7 +5,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Weak,
     },
     task::{Context, Poll},
@@ -15,6 +15,7 @@ use std::{
 use async_trait::async_trait;
 use byteorder::{ReadBytesExt, BE};
 use bytes::Bytes;
+use bytesize::ByteSize;
 use futures::{FutureExt, Stream};
 use tokio::{io::ReadBuf, net::UdpSocket, sync::Notify};
 use tracing::{debug, instrument, trace};
@@ -57,15 +58,17 @@ pub(crate) struct Session {
     socket: UdpSocket,
     client: Option<ClientAddr>,
     pub(super) created_at: Instant,
-    pub(super) tx_bytes: AtomicUsize,
-    pub(super) rx_bytes: AtomicUsize,
+    pub(super) tx_bytes: AtomicU64,
+    pub(super) rx_bytes: AtomicU64,
     drop_notify: Arc<Notify>,
 }
 
 impl Display for Session {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self.client {
-            Some(ClientAddr(client)) => write!(f, "Session ({} <= {})", self.server.name, client),
+            Some(ClientAddr(client)) => {
+                write!(f, "Session ({} <= {})", self.server.name, client.ip())
+            }
             None => write!(f, "Session ({})", self.server.name),
         }
     }
@@ -104,7 +107,7 @@ impl Session {
         request.write_all(&target.0.port().to_be_bytes())?;
         request.write_all(buf)?;
         let n = self.socket.send(&request).await?;
-        self.tx_bytes.fetch_add(n, Ordering::Relaxed);
+        self.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
         self.server.status.usage.add_tx(n);
         Ok(())
     }
@@ -135,11 +138,11 @@ impl Drop for Session {
         let tx = *self.tx_bytes.get_mut();
         self.server.status.usage.close_session();
         debug!(
-            "Close {}, {:#?}, RX {}, TX {}",
+            "Close {}, {:#.0?}, RX {}, TX {}",
             self,
             self.created_at.elapsed(),
-            rx,
-            tx
+            ByteSize(rx),
+            ByteSize(tx),
         );
         self.drop_notify.notify_waiters();
     }
@@ -186,7 +189,9 @@ impl Stream for SessionIncoming {
                 Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
                 Poll::Ready(Ok(())) => {
                     if let Some((pkt, remote)) = decode_packet(buf.filled()) {
-                        session.rx_bytes.fetch_add(pkt.len(), Ordering::Relaxed);
+                        session
+                            .rx_bytes
+                            .fetch_add(pkt.len() as u64, Ordering::Relaxed);
                         session.server.status.usage.add_rx(pkt.len());
                         break Poll::Ready(Some(Ok((remote, Bytes::copy_from_slice(pkt)))));
                     }
