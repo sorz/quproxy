@@ -1,5 +1,4 @@
 use std::{
-    fmt::Debug,
     io::{self, ErrorKind},
     sync::Arc,
 };
@@ -102,10 +101,7 @@ where
     }
 }
 
-impl<S> Session<S>
-where
-    S: Send + Sync + Debug + 'static,
-{
+impl<S: Status> Session<S> {
     async fn forward_remote_to_client<I>(self: Arc<Self>, client: ClientAddr, sender: I)
     where
         I: Sink<UdpPacket> + Send + Sync + 'static,

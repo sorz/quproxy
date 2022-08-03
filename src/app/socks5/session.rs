@@ -1,5 +1,5 @@
 use std::{
-    fmt::{Debug, Display, Formatter},
+    fmt::{Display, Formatter},
     future::Future,
     io::{self, Result, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -19,7 +19,11 @@ use futures::{FutureExt, Stream};
 use tokio::{io::ReadBuf, net::UdpSocket, sync::Notify};
 use tracing::{debug, instrument, trace};
 
-use crate::app::types::{ClientAddr, RemoteAddr};
+use crate::app::{
+    socks5::Usage,
+    status::Status,
+    types::{ClientAddr, RemoteAddr},
+};
 
 use super::SocksServer;
 
@@ -27,13 +31,13 @@ const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
 
 #[async_trait]
-pub(crate) trait Bindable<S> {
+pub(crate) trait Bindable<S: Status> {
     async fn bind(&self, client: Option<ClientAddr>) -> Result<Session<S>>;
     fn server_name(&self) -> &str;
 }
 
 #[async_trait]
-impl<S: Send + Sync + Debug> Bindable<S> for Arc<SocksServer<S>> {
+impl<S: Status> Bindable<S> for Arc<SocksServer<S>> {
     async fn bind(&self, client: Option<ClientAddr>) -> Result<Session<S>> {
         let bind_ip: IpAddr = match self.udp_addr.ip() {
             IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),
@@ -44,17 +48,7 @@ impl<S: Send + Sync + Debug> Bindable<S> for Arc<SocksServer<S>> {
         let socket = UdpSocket::bind((bind_ip, 0)).await?;
         socket.connect(self.udp_addr).await?;
 
-        let session = Session {
-            server: self.clone(),
-            socket,
-            client,
-            drop_notify: Default::default(),
-            created_at: Instant::now(),
-            tx_bytes: Default::default(),
-            rx_bytes: Default::default(),
-        };
-        debug!("Open {}", session);
-        Ok(session)
+        Ok(Session::new(self.clone(), socket, client))
     }
 
     fn server_name(&self) -> &str {
@@ -62,7 +56,7 @@ impl<S: Send + Sync + Debug> Bindable<S> for Arc<SocksServer<S>> {
     }
 }
 
-pub(crate) struct Session<S> {
+pub(crate) struct Session<S: Status> {
     pub(crate) server: Arc<SocksServer<S>>,
     socket: UdpSocket,
     client: Option<ClientAddr>,
@@ -72,7 +66,7 @@ pub(crate) struct Session<S> {
     drop_notify: Arc<Notify>,
 }
 
-impl<S> Display for Session<S> {
+impl<S: Status> Display for Session<S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self.client {
             Some(ClientAddr(client)) => write!(f, "Session ({} <= {})", self.server.name, client),
@@ -81,7 +75,22 @@ impl<S> Display for Session<S> {
     }
 }
 
-impl<S> Session<S> {
+impl<S: Status> Session<S> {
+    fn new(server: Arc<SocksServer<S>>, socket: UdpSocket, client: Option<ClientAddr>) -> Self {
+        AsRef::<Usage>::as_ref(&server.status).open_session();
+        let session = Session {
+            server,
+            socket,
+            client,
+            drop_notify: Default::default(),
+            created_at: Instant::now(),
+            tx_bytes: Default::default(),
+            rx_bytes: Default::default(),
+        };
+        debug!("Open {}", session);
+        session
+    }
+
     #[instrument(skip_all, fields(buf_len=buf.len()))]
     pub(crate) async fn send_to_remote(&self, target: RemoteAddr, buf: &[u8]) -> Result<()> {
         let mut request = Vec::with_capacity(buf.len() + 22);
@@ -100,6 +109,7 @@ impl<S> Session<S> {
         request.write_all(buf)?;
         let n = self.socket.send(&request).await?;
         self.tx_bytes.fetch_add(n, Ordering::Relaxed);
+        AsRef::<Usage>::as_ref(&self.server.status).add_tx(n);
         Ok(())
     }
 
@@ -123,10 +133,11 @@ impl<S> Session<S> {
     }
 }
 
-impl<S> Drop for Session<S> {
+impl<S: Status> Drop for Session<S> {
     fn drop(&mut self) {
         let rx = *self.rx_bytes.get_mut();
         let tx = *self.tx_bytes.get_mut();
+        AsRef::<Usage>::as_ref(&self.server.status).close_session();
         debug!(
             "Close {}, {:#?}, RX {}, TX {}",
             self,
@@ -138,12 +149,12 @@ impl<S> Drop for Session<S> {
     }
 }
 
-pub(crate) struct SessionIncoming<S> {
+pub(crate) struct SessionIncoming<S: Status> {
     session: Weak<Session<S>>,
     drop_notify: Pin<Box<dyn Future<Output = ()> + Sync + Send>>,
 }
 
-impl<S> SessionIncoming<S> {
+impl<S: Status> SessionIncoming<S> {
     fn new(session: &Arc<Session<S>>) -> Self {
         Self {
             session: Arc::downgrade(session),
@@ -156,7 +167,7 @@ async fn wait_notify(notify: Arc<Notify>) {
     notify.notified().await
 }
 
-impl<T> Stream for SessionIncoming<T> {
+impl<S: Status> Stream for SessionIncoming<S> {
     type Item = io::Result<(RemoteAddr, Bytes)>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -180,6 +191,7 @@ impl<T> Stream for SessionIncoming<T> {
                 Poll::Ready(Ok(())) => {
                     if let Some((pkt, remote)) = decode_packet(buf.filled()) {
                         session.rx_bytes.fetch_add(pkt.len(), Ordering::Relaxed);
+                        AsRef::<Usage>::as_ref(&session.server.status).add_rx(pkt.len());
                         break Poll::Ready(Some(Ok((remote, Bytes::copy_from_slice(pkt)))));
                     }
                 }

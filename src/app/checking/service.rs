@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 use derivative::Derivative;
 use futures::stream::{FuturesUnordered, StreamExt};
+use parking_lot::Mutex;
 use std::{fmt::Debug, future, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::{interval_at, timeout, Instant};
 use tracing::{debug, instrument, trace};
 
 use crate::app::{
+    checking::Health,
     socks5::{Bindable, SocksServer},
     status::Status,
     AppContext,
@@ -53,7 +55,7 @@ impl<S: Status> CheckingService<S> {
         let (sum, ok) = checkings
             .inspect(|(server, result)| {
                 let delay = result.as_ref().ok().map(|t| (*t).into());
-                let mut health = server.status.as_ref().lock();
+                let mut health = AsRef::<Mutex<Health>>::as_ref(&server.status).lock();
                 health.add_measurement(delay);
                 trace!(
                     "{}: avg delay {:?}, {}% loss",

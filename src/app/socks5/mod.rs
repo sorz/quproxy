@@ -2,8 +2,10 @@ mod forward;
 mod refer;
 mod server;
 mod session;
+mod traffic;
 
 pub(crate) use forward::SocksForwardService;
 pub(crate) use refer::SocksReferService;
 pub(crate) use server::{SocksServer, SocksServerReferrer};
-pub(crate) use session::Bindable;
+pub(super) use session::Bindable;
+pub(super) use traffic::Usage;
