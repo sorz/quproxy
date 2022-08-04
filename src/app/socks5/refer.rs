@@ -79,8 +79,10 @@ impl SocksReferService {
         }
 
         // Update SOCKSv5 servers
-        let mut servers = self.context.update_socks5_servers();
-        servers.retain(|server| !dead_servers.contains(server) && !new_servers.contains(server));
-        servers.extend(new_servers.into_iter());
+        self.context.update_socks5_servers(|servers| {
+            servers
+                .retain(|server| !dead_servers.contains(server) && !new_servers.contains(server));
+            servers.extend(new_servers.into_iter());
+        });
     }
 }

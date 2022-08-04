@@ -3,7 +3,7 @@ use derivative::Derivative;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::{fmt::Debug, future, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::{interval_at, timeout, Instant};
-use tracing::{debug, instrument, trace};
+use tracing::{debug, info, instrument, trace};
 
 use crate::app::{
     socks5::{Bindable, SocksServer},
@@ -38,6 +38,8 @@ impl CheckingService {
         trace!("Start checking all servers");
         let max_wait = std::cmp::min(Duration::from_secs(4), self.context.cli_args.check_interval);
         let dns_addr = self.context.cli_args.check_dns_server;
+        let servers = self.context.socks5_servers();
+        let best_server = servers.first().cloned();
         let checkings: FuturesUnordered<_> = self
             .context
             .socks5_servers()
@@ -66,6 +68,22 @@ impl CheckingService {
             })
             .await;
         debug!("Check done, {}/{} up", ok, sum);
+        let new_best_server = self.reorder_servers();
+        if best_server != new_best_server {
+            if let Some(server) = new_best_server {
+                info!("Switch best server to {}", server.name)
+            }
+        }
+    }
+
+    fn reorder_servers(&self) -> Option<Arc<SocksServer>> {
+        self.context.update_socks5_servers(|servers| {
+            servers.sort_by_key(|h| {
+                let health = h.status.health.lock();
+                health.score().unwrap_or(i16::MAX)
+            });
+            servers.first().cloned()
+        })
     }
 }
 
@@ -77,7 +95,7 @@ trait Checkable: Bindable {
         dns_addr: SocketAddr,
         max_wait: Duration,
     ) -> io::Result<Duration> {
-        debug!("Checking DNS query delay");
+        trace!("Checking DNS query delay");
         // Construct DNS query for A record of "." (root)
         let query: [u8; 17] = [
             rand::random(),

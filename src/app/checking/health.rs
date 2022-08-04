@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, num::NonZeroU8, time::Duration};
+use std::{cell::Cell, collections::VecDeque, num::NonZeroU8, time::Duration};
 
 const DELAY_POWER: f32 = 0.75;
 const DELAY_MAX_HISTORY: usize = 100;
@@ -28,22 +28,25 @@ impl Delay {
 #[derive(Debug, Clone)]
 pub(crate) struct Health {
     delay_history: VecDeque<Option<Delay>>,
+    cached_score: Cell<Option<i16>>,
 }
 
 impl Default for Health {
     fn default() -> Self {
         Self {
             delay_history: VecDeque::with_capacity(DELAY_MAX_HISTORY),
+            cached_score: None.into(),
         }
     }
 }
 
 impl Health {
-    pub(crate) fn add_measurement(&mut self, delay: Option<Delay>) {
+    pub(super) fn add_measurement(&mut self, delay: Option<Delay>) {
         if self.delay_history.len() >= DELAY_MAX_HISTORY {
             self.delay_history.pop_front();
         }
         self.delay_history.push_back(delay);
+        self.cached_score.take();
     }
 
     pub(crate) fn loss_percent(&self) -> u8 {
@@ -70,5 +73,17 @@ impl Health {
         } else {
             Duration::from_millis(sum as u64 / count as u64).into()
         }
+    }
+
+    pub(super) fn score(&self) -> Option<i16> {
+        if let Some(score) = self.cached_score.get() {
+            return Some(score);
+        }
+        let delay_ms = self.average_delay()?.as_millis().clamp(10, 2000) as f32;
+        let loss_rate = self.loss_percent().clamp(0, 99) as f32 / 100.0;
+        let score = (delay_ms + loss_rate * 1000.0) / (1.0 - loss_rate).powf(2.0);
+        let score = score.clamp(i16::MIN as f32, i16::MAX as f32).round() as i16;
+        self.cached_score.replace(Some(score));
+        Some(score)
     }
 }

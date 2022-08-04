@@ -53,10 +53,10 @@ impl AppContext {
                     continue;
                 }
                 match protocol {
-                    UpstreamProtocol::Socks5Tcp => {
+                    UpstreamProtocol::Socks5Udp => {
                         socks5_servers.push(SocksServer::new(address, Some(name)).into())
                     }
-                    UpstreamProtocol::Socks5Udp => {
+                    UpstreamProtocol::Socks5Tcp => {
                         socks5_referrers.push(SocksServerReferrer::new(address, Some(name)).into())
                     }
                 }
@@ -97,7 +97,11 @@ impl AppContext {
         self.socks5_referrers.read().clone()
     }
 
-    pub(crate) fn update_socks5_servers(&self) -> RwLockWriteGuard<Vec<Arc<SocksServer>>> {
-        self.socks5_servers.write()
+    pub(crate) fn update_socks5_servers<F, R>(&self, func: F) -> R
+    where
+        F: FnOnce(&mut Vec<Arc<SocksServer>>) -> R,
+    {
+        let mut servers = self.socks5_servers.write();
+        func(&mut servers)
     }
 }
