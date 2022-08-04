@@ -71,7 +71,11 @@ impl CheckingService {
         let new_best_server = self.reorder_servers();
         if best_server != new_best_server {
             if let Some(server) = new_best_server {
-                info!("Switch best server to {}", server.name)
+                info!(
+                    "Switch best server to {} {}",
+                    server.name,
+                    server.status.health.lock()
+                )
             }
         }
     }
@@ -80,7 +84,7 @@ impl CheckingService {
         self.context.update_socks5_servers(|servers| {
             servers.sort_by_key(|h| {
                 let health = h.status.health.lock();
-                health.score().unwrap_or(i16::MAX)
+                health.score()
             });
             servers.first().cloned()
         })

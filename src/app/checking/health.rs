@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::VecDeque, num::NonZeroU8, time::Duration};
+use std::{cell::Cell, collections::VecDeque, fmt::Display, num::NonZeroU8, time::Duration};
 
 const DELAY_POWER: f32 = 0.75;
 const DELAY_MAX_HISTORY: usize = 100;
@@ -40,6 +40,22 @@ impl Default for Health {
     }
 }
 
+impl Display for Health {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(delay) = self.average_delay() {
+            write!(
+                f,
+                "[{:#.1?} {}% {}]",
+                delay,
+                self.loss_percent(),
+                self.score()
+            )
+        } else {
+            write!(f, "[unknown ({})]", self.score())
+        }
+    }
+}
+
 impl Health {
     pub(super) fn add_measurement(&mut self, delay: Option<Delay>) {
         if self.delay_history.len() >= DELAY_MAX_HISTORY {
@@ -75,15 +91,18 @@ impl Health {
         }
     }
 
-    pub(super) fn score(&self) -> Option<i16> {
+    pub(super) fn score(&self) -> i16 {
         if let Some(score) = self.cached_score.get() {
-            return Some(score);
+            score
+        } else if let Some(delay) = self.average_delay() {
+            let delay_ms = delay.as_millis().clamp(10, 2000) as f32;
+            let loss_rate = self.loss_percent().clamp(0, 99) as f32 / 100.0;
+            let score = (delay_ms + loss_rate * 1000.0) / (1.0 - loss_rate).powf(2.0);
+            let score = score.clamp(i16::MIN as f32, i16::MAX as f32).round() as i16;
+            self.cached_score.replace(Some(score));
+            score
+        } else {
+            i16::MAX
         }
-        let delay_ms = self.average_delay()?.as_millis().clamp(10, 2000) as f32;
-        let loss_rate = self.loss_percent().clamp(0, 99) as f32 / 100.0;
-        let score = (delay_ms + loss_rate * 1000.0) / (1.0 - loss_rate).powf(2.0);
-        let score = score.clamp(i16::MIN as f32, i16::MAX as f32).round() as i16;
-        self.cached_score.replace(Some(score));
-        Some(score)
     }
 }
