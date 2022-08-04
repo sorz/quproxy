@@ -6,7 +6,7 @@ use parking_lot::{RwLock, RwLockWriteGuard};
 use tracing::{info, warn};
 
 use super::socks5::{SocksServer, SocksServerReferrer};
-use crate::cli::CliArgs;
+use crate::cli::{CliArgs, ConfigFile, Upstream, UpstreamProtocol};
 
 #[derive(Derivative)]
 #[derivative(Debug, Clone(bound = ""))]
@@ -28,14 +28,41 @@ fn filter_duplicated_socket_addrs(addrs: &Vec<SocketAddr>) -> HashSet<SocketAddr
 
 impl AppContext {
     pub(crate) fn from_cli_args(args: CliArgs) -> Self {
-        let socks5_servers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_udp)
+        let mut socks5_servers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_udp)
             .into_iter()
             .map(|addr| SocksServer::new(addr, None).into())
             .collect();
-        let socks5_referrers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_tcp)
+        let mut socks5_referrers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_tcp)
             .into_iter()
             .map(|addr| SocksServerReferrer::new(addr, None).into())
             .collect();
+
+        // TODO: check duplicated socket address & name
+        if let Some(path) = &args.list {
+            let cfg = ConfigFile::from_path(path).expect("Error on read upstream list file");
+            for (
+                name,
+                Upstream {
+                    protocol,
+                    address,
+                    enabled,
+                },
+            ) in cfg.upstreams
+            {
+                if !enabled {
+                    continue;
+                }
+                match protocol {
+                    UpstreamProtocol::Socks5Tcp => {
+                        socks5_servers.push(SocksServer::new(address, Some(name)).into())
+                    }
+                    UpstreamProtocol::Socks5Udp => {
+                        socks5_referrers.push(SocksServerReferrer::new(address, Some(name)).into())
+                    }
+                }
+            }
+        }
+
         info!(
             "Configured SOCKSv5 servers: {}",
             socks5_servers.len() + socks5_referrers.len()

@@ -1,9 +1,14 @@
 use std::{
+    collections::HashMap,
+    fs::File,
+    io::{self, Read},
     net::{IpAddr, Ipv6Addr, SocketAddr},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use clap::Parser;
+use serde::Deserialize;
 use tracing::metadata::LevelFilter;
 
 #[derive(Parser, Debug)]
@@ -17,6 +22,10 @@ pub(crate) struct CliArgs {
     /// Port number to bind on for the incoming UDP sessions
     #[clap(short = 'p', long, required = true)]
     pub(crate) port: u16,
+
+    /// TOML config file with the list of upstream proxy servers.
+    #[clap(short = 'l', long)]
+    pub(crate) list: Option<PathBuf>,
 
     /// TCP socket address of SOCKSv5 servers. The UDP socket addresses will
     /// be retrived via long-live TCP connections. This conforms to RFC 1928.
@@ -63,4 +72,44 @@ pub(crate) struct CliArgs {
     /// Max number of tracked UDP sessions
     #[clap(long, default_value_t = 512)]
     pub(crate) udp_max_sessions: usize,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct ConfigFile {
+    #[serde(serialize_with = "toml::ser::tables_last")]
+    pub(crate) upstreams: HashMap<String, Upstream>,
+}
+
+#[derive(Deserialize, Default, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum UpstreamProtocol {
+    #[default]
+    #[serde(alias = "socks5udp")]
+    #[serde(alias = "socks5_udp")]
+    Socks5Udp,
+    #[serde(alias = "socks5tcp")]
+    #[serde(alias = "socks5_tcp")]
+    Socks5Tcp,
+}
+
+fn bool_true() -> bool {
+    true
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
+pub(crate) struct Upstream {
+    #[serde(alias = "proto")]
+    #[serde(default)]
+    pub(crate) protocol: UpstreamProtocol,
+    #[serde(alias = "addr")]
+    pub(crate) address: SocketAddr,
+    #[serde(default = "bool_true")]
+    pub(crate) enabled: bool,
+}
+
+impl ConfigFile {
+    pub(crate) fn from_path<T: AsRef<Path>>(path: T) -> io::Result<Self> {
+        let mut buf = String::new();
+        File::open(path)?.read_to_string(&mut buf)?;
+        Ok(toml::de::from_str(&buf)?)
+    }
 }
