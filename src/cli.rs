@@ -40,6 +40,11 @@ pub(crate) struct CliArgs {
     #[clap(multiple_values = true)]
     pub(crate) socks5_udp: Vec<SocketAddr>,
 
+    /// Obtain domain name from QUIC initial packet (if exists), pass it to
+    /// SOCKSv5 server for remote DNS resolution.
+    #[clap(long)]
+    pub(crate) remote_dns: bool,
+
     /// Disable availability check
     #[clap(long)]
     pub(crate) no_check: bool,

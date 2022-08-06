@@ -1,5 +1,6 @@
 use std::{
     io::{self, ErrorKind},
+    pin::Pin,
     sync::Arc,
 };
 
@@ -9,6 +10,10 @@ use lru_time_cache::{Entry, LruCache};
 use tracing::{debug, info, trace, warn};
 
 use crate::app::{
+    socks5::{
+        quic::{self, QuicConnection},
+        session,
+    },
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
@@ -53,7 +58,8 @@ where
         dst: RemoteAddr,
         pkt: Bytes,
     ) -> io::Result<()> {
-        let session = self.retrive_session(src).await?;
+        let remote_dns = self.context.cli_args.remote_dns;
+        let (session, is_new) = self.retrive_session(src).await?;
         trace!(
             "{:?} => {:?} via {}: {} bytes",
             src,
@@ -61,6 +67,12 @@ where
             pkt.len(),
             session.server.name
         );
+        if remote_dns && is_new && pkt.len() >= quic::MIN_DATAGRAM_SIZE_BYTES {
+            if let Ok(init_pkt) = quic::InitialPacket::decode(pkt.clone()) {
+                trace!("QUIC Initial packet decoded");
+                // TODO
+            }
+        }
         if let Err(err) = session.send_to_remote(dst, &pkt).await {
             info!(
                 "failed to forward {} bytes packet to remote {:?} via {}: {}",
@@ -73,9 +85,12 @@ where
         Ok(())
     }
 
-    async fn retrive_session(&mut self, client: ClientAddr) -> io::Result<&Arc<Session>> {
-        let session = match self.sessions.entry(client) {
-            Entry::Occupied(entry) => entry.into_mut(),
+    async fn retrive_session(
+        &mut self,
+        client: ClientAddr,
+    ) -> io::Result<(&mut Arc<Session>, bool)> {
+        match self.sessions.entry(client) {
+            Entry::Occupied(entry) => Ok((entry.into_mut(), false)),
             Entry::Vacant(entry) => {
                 // Select proxy & create new session
                 let proxy = self
@@ -92,10 +107,9 @@ where
                         .forward_remote_to_client(client, sender_cloned)
                         .await
                 });
-                entry.insert(session)
+                Ok((entry.insert(session), true))
             }
-        };
-        Ok(session)
+        }
     }
 }
 

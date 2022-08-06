@@ -22,7 +22,7 @@ use tracing::{debug, instrument, trace};
 
 use crate::app::types::{ClientAddr, RemoteAddr};
 
-use super::SocksServer;
+use super::{quic::QuicConnection, SocksServer};
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
@@ -57,6 +57,7 @@ pub(crate) struct Session {
     pub(crate) server: Arc<SocksServer>,
     socket: UdpSocket,
     client: Option<ClientAddr>,
+    quic: Option<QuicConnection>,
     pub(super) created_at: Instant,
     pub(super) tx_bytes: AtomicU64,
     pub(super) rx_bytes: AtomicU64,
@@ -67,10 +68,18 @@ impl Display for Session {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self.client {
             Some(ClientAddr(client)) => {
-                write!(f, "Session ({} <= {})", self.server.name, client.ip())
+                write!(f, "Session ({} => {}", client.ip(), self.server.name)?
             }
-            None => write!(f, "Session ({})", self.server.name),
+            None => write!(f, "Session ({}", self.server.name)?,
         }
+        if let Some(QuicConnection {
+            remote_name: Some(name),
+            ..
+        }) = &self.quic
+        {
+            write!(f, " => {}", name)?;
+        }
+        write!(f, ")")
     }
 }
 
@@ -81,6 +90,7 @@ impl Session {
             server,
             socket,
             client,
+            quic: None,
             drop_notify: Default::default(),
             created_at: Instant::now(),
             tx_bytes: Default::default(),
@@ -129,6 +139,10 @@ impl Session {
 
     pub(super) fn incoming(self: &Arc<Self>) -> SessionIncoming {
         SessionIncoming::new(self)
+    }
+
+    pub(super) fn set_quic(&mut self, quic: QuicConnection) {
+        self.quic = Some(quic);
     }
 }
 
