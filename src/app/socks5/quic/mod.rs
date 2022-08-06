@@ -42,10 +42,13 @@ impl From<Unspecified> for ParseError {
 
 impl QuicConnection {
     pub(super) fn try_from(remote: RemoteAddr, pkt: InitialPacket) -> Result<Self, ParseError> {
-        // TODO
+        let remote_name = match pkt.crypto_message()? {
+            Some(msg) => tls::get_server_name_from_client_hello(msg),
+            None => None,
+        };
         Ok(Self {
             remote_orig: remote,
-            remote_name: None,
+            remote_name,
         })
     }
 }
@@ -70,7 +73,7 @@ impl InitialPacket {
             return Err(ParseError::NotInitialPacket);
         }
 
-        // Decode unprotocted header
+        // Decode unprotected header
         let dcid = decode_conn_id(&mut buf)?;
         let _scid = decode_conn_id(&mut buf)?;
         let token = {

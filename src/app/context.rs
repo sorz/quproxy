@@ -2,7 +2,7 @@ use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use derivative::Derivative;
 use lru_time_cache::LruCache;
-use parking_lot::{RwLock, RwLockWriteGuard};
+use parking_lot::RwLock;
 use tracing::{info, warn};
 
 use super::socks5::{SocksServer, SocksServerReferrer};

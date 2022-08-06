@@ -1,6 +1,5 @@
 use std::{
     io::{self, ErrorKind},
-    pin::Pin,
     sync::Arc,
 };
 
@@ -10,10 +9,7 @@ use lru_time_cache::{Entry, LruCache};
 use tracing::{debug, info, trace, warn};
 
 use crate::app::{
-    socks5::{
-        quic::{self, QuicConnection},
-        session,
-    },
+    socks5::quic::{self, QuicConnection},
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
@@ -70,7 +66,10 @@ where
         if remote_dns && is_new && pkt.len() >= quic::MIN_DATAGRAM_SIZE_BYTES {
             if let Ok(init_pkt) = quic::InitialPacket::decode(pkt.clone()) {
                 trace!("QUIC Initial packet decoded");
-                // TODO
+                if let Ok(quic) = QuicConnection::try_from(dst, init_pkt) {
+                    debug!("{:?}", quic);
+                    // TODO
+                }
             }
         }
         if let Err(err) = session.send_to_remote(dst, &pkt).await {
