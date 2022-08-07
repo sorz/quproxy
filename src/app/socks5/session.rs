@@ -223,24 +223,24 @@ impl Drop for Session {
 
 pub(crate) struct SessionIncoming {
     session: Weak<Session>,
-    name_to_addr: Option<(String, RemoteAddr)>,
+    override_remote: Option<RemoteAddr>,
     drop_notify: Pin<Box<dyn Future<Output = ()> + Sync + Send>>,
 }
 
 impl SessionIncoming {
     fn new(session: &Arc<Session>) -> Self {
-        let name_to_addr = if let Some(QuicConnection {
-            remote_name: Some(ref name),
+        let override_remote = if let Some(QuicConnection {
+            remote_name: Some(_),
             remote_orig,
         }) = session.quic
         {
-            Some((name.clone(), remote_orig))
+            Some(remote_orig)
         } else {
             None
         };
         Self {
             session: Arc::downgrade(session),
-            name_to_addr,
+            override_remote,
             drop_notify: Box::pin(wait_notify(session.drop_notify.clone())),
         }
     }
@@ -283,24 +283,20 @@ impl Stream for SessionIncoming {
                             .rx_bytes
                             .fetch_add(pkt.len() as u64, Ordering::Relaxed);
                         session.server.status.usage.add_rx(pkt.len());
-                        let remote: RemoteAddr = match addr {
-                            SocksDstAddr::Ipv4(ip) => SocketAddr::from((ip, port)).into(),
-                            SocksDstAddr::Ipv6(ip) => SocketAddr::from((ip, port)).into(),
-                            SocksDstAddr::Name(name) => {
-                                if let Some((map_name, map_addr)) = &self.name_to_addr {
-                                    if map_name == &name {
-                                        *map_addr
-                                    } else {
-                                        break ready_io_err!(
-                                            InvalidData,
-                                            format!("Unknown name {}, expect {}", name, map_name)
-                                        );
-                                    }
-                                } else {
+                        let remote: RemoteAddr = if let Some(remote) = self.override_remote {
+                            remote
+                        } else {
+                            match addr {
+                                SocksDstAddr::Ipv4(ip) => SocketAddr::from((ip, port)).into(),
+                                SocksDstAddr::Ipv6(ip) => SocketAddr::from((ip, port)).into(),
+                                SocksDstAddr::Name(name) => {
                                     break ready_io_err!(
                                         InvalidData,
-                                        "Received domain name but remote DNS not in use"
-                                    );
+                                        format!(
+                                            "Unexpected domain name `{}`, remote DNS not in use",
+                                            name
+                                        )
+                                    )
                                 }
                             }
                         };
