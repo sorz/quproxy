@@ -1,5 +1,6 @@
 use std::{
     io::{self, ErrorKind},
+    net::SocketAddr,
     sync::Arc,
 };
 
@@ -14,7 +15,10 @@ use crate::app::{
     AppContext,
 };
 
-use super::session::{Bindable, Session};
+use super::{
+    server::AppProto,
+    session::{Bindable, Session},
+};
 
 pub(crate) struct SocksForwardService<I: Sink<UdpPacket>> {
     context: AppContext,
@@ -56,17 +60,17 @@ where
     ) -> io::Result<()> {
         if !self.sessions.contains_key(&client) {
             // Start new session
-            let mut session = self.create_session(client).await?;
+            let mut quic = None;
             if self.context.cli_args.remote_dns && pkt.len() >= quic::MIN_DATAGRAM_SIZE_BYTES {
                 if let Ok(init_pkt) = quic::InitialPacket::decode(pkt.clone()) {
                     trace!("QUIC Initial packet decoded");
-                    if let Ok(quic) = QuicConnection::try_from(remote, init_pkt) {
+                    if let Ok(conn) = QuicConnection::try_from(remote, init_pkt) {
                         trace!("Decoded: {:?}", quic);
-                        session.set_quic(quic);
+                        quic = Some(conn);
                     }
                 }
             }
-            let session = Arc::new(session);
+            let session: Arc<Session> = self.create_session(client, remote, quic).await?.into();
             self.start_session(session.clone(), client);
             self.sessions.insert(client, session);
         }
@@ -90,15 +94,29 @@ where
         Ok(())
     }
 
-    async fn create_session(&self, client: ClientAddr) -> io::Result<Session> {
-        // Select proxy & create new session
+    async fn create_session(
+        &self,
+        client: ClientAddr,
+        remote: RemoteAddr,
+        quic: Option<QuicConnection>,
+    ) -> io::Result<Session> {
+        let proto = match (remote, &quic) {
+            (_, Some(quic)) if quic.remote_name.is_some() => AppProto::Any,
+            (RemoteAddr(SocketAddr::V4(_)), _) => AppProto::IPv4,
+            (RemoteAddr(SocketAddr::V6(_)), _) => AppProto::IPv6,
+        };
         let proxy = self
             .context
             .socks5_servers()
-            .first()
+            .into_iter()
+            .find(|p| p.inner_proto.get().capable(proto))
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "No avaiable proxy"))?
             .clone();
-        proxy.bind(Some(client)).await
+        let mut session = proxy.bind(Some(client)).await?;
+        if let Some(quic) = quic {
+            session.set_quic(quic);
+        }
+        Ok(session)
     }
 
     fn start_session(&self, session: Arc<Session>, client: ClientAddr) {

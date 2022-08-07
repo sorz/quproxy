@@ -1,7 +1,10 @@
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
 };
 
 use derivative::Derivative;
@@ -12,12 +15,73 @@ use tokio::{
 
 use crate::app::ServerStatus;
 
+const INNER_PROTO_IPV4: u8 = 1;
+const INNER_PROTO_IPV6: u8 = 2;
+const INNER_PROTO_INET: u8 = 3;
+
+#[derive(Debug, Default)]
+pub(crate) struct AtomicInnerProto {
+    inner: AtomicU8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InnerProto {
+    Unspecified,
+    IPv4,
+    IPv6,
+    Inet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppProto {
+    IPv4,
+    IPv6,
+    Any,
+}
+
+impl AtomicInnerProto {
+    pub(crate) fn get(&self) -> InnerProto {
+        match self.inner.load(Ordering::Relaxed) {
+            INNER_PROTO_IPV4 => InnerProto::IPv4,
+            INNER_PROTO_IPV6 => InnerProto::IPv6,
+            INNER_PROTO_INET => InnerProto::Inet,
+            _ => InnerProto::Unspecified,
+        }
+    }
+
+    pub(crate) fn set(&self, proto: InnerProto) {
+        let value = match proto {
+            InnerProto::Unspecified => 0,
+            InnerProto::IPv4 => INNER_PROTO_IPV4,
+            InnerProto::IPv6 => INNER_PROTO_IPV6,
+            InnerProto::Inet => INNER_PROTO_INET,
+        };
+        self.inner.store(value, Ordering::Relaxed);
+    }
+}
+
+impl InnerProto {
+    pub(crate) fn capable(&self, app: AppProto) -> bool {
+        matches!(
+            (self, app),
+            (_, AppProto::Any)
+                | (InnerProto::Unspecified, _)
+                | (InnerProto::Inet, _)
+                | (InnerProto::IPv4, AppProto::IPv4)
+                | (InnerProto::IPv6, AppProto::IPv6)
+        )
+    }
+}
+
 #[derive(Derivative)]
 #[derivative(Debug, Hash, PartialEq, Eq)]
 pub(crate) struct SocksServer {
     pub(crate) name: String,
     pub(crate) udp_addr: SocketAddr,
 
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
+    pub(crate) inner_proto: AtomicInnerProto,
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
     pub(crate) status: ServerStatus,
@@ -29,6 +93,7 @@ impl SocksServer {
         Self {
             name,
             udp_addr,
+            inner_proto: Default::default(),
             status: Default::default(),
         }
     }

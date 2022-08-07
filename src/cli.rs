@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{self, Read},
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -54,9 +54,13 @@ pub(crate) struct CliArgs {
     #[clap(parse(try_from_str = parse_duration::parse))]
     pub(crate) check_interval: Duration,
 
-    /// Address of a DNS server to do availability check
+    /// Address of a DNS server to do availability check (IPv4)
     #[clap(long, default_value = "1.1.1.1:53")]
-    pub(crate) check_dns_server: SocketAddr,
+    pub(crate) check_dns_server_v4: SocketAddrV4,
+
+    /// Address of a DNS server to do availability check (IPv6)
+    #[clap(long, default_value = "[2606:4700:4700::1111]:53")]
+    pub(crate) check_dns_server_v6: SocketAddrV6,
 
     /// Period of time to check & reinitiate SOCKSv5 TCP connections
     #[clap(long, default_value = "20s")]
