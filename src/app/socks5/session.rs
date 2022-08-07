@@ -1,7 +1,7 @@
 use std::{
     fmt::{Display, Formatter},
     future::Future,
-    io::{self, Result, Write},
+    io::{self, ErrorKind, Read, Result, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     pin::Pin,
     sync::{
@@ -13,7 +13,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use byteorder::{ReadBytesExt, BE};
+use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::{FutureExt, Stream};
@@ -26,6 +26,66 @@ use super::{quic::QuicConnection, SocksServer};
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
+const ATYP_NAME: u8 = 0x03;
+
+enum SocksDstAddr<T> {
+    Ipv4(Ipv4Addr),
+    Ipv6(Ipv6Addr),
+    Name(T),
+}
+
+impl<T> From<IpAddr> for SocksDstAddr<T> {
+    fn from(addr: IpAddr) -> Self {
+        match addr {
+            IpAddr::V4(addr) => SocksDstAddr::Ipv4(addr),
+            IpAddr::V6(addr) => SocksDstAddr::Ipv6(addr),
+        }
+    }
+}
+
+impl<T: AsRef<str>> SocksDstAddr<T> {
+    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        match self {
+            SocksDstAddr::Ipv4(addr) => {
+                writer.write_u8(ATYP_IPV4)?;
+                writer.write_all(&addr.octets())
+            }
+            SocksDstAddr::Ipv6(addr) => {
+                writer.write_u8(ATYP_IPV6)?;
+                writer.write_all(&addr.octets())
+            }
+            SocksDstAddr::Name(name) => {
+                writer.write_u8(ATYP_NAME)?;
+                writer.write_u8(name.as_ref().len().try_into().unwrap())?;
+                writer.write_all(name.as_ref().as_bytes())
+            }
+        }
+    }
+}
+
+impl SocksDstAddr<String> {
+    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
+        let addr = match reader.read_u8()? {
+            ATYP_IPV4 => SocksDstAddr::Ipv4(Ipv4Addr::from(reader.read_u32::<BE>()?)),
+            ATYP_IPV6 => SocksDstAddr::Ipv6(Ipv6Addr::from(reader.read_u128::<BE>()?)),
+            ATYP_NAME => {
+                let len = reader.read_u8()? as usize;
+                let mut buf = vec![0u8; len];
+                reader.read_exact(&mut buf)?;
+                let name = String::from_utf8(buf)
+                    .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+                SocksDstAddr::Name(name)
+            }
+            _ => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Unsupported address type",
+                ))
+            }
+        };
+        Ok(addr)
+    }
+}
 
 #[async_trait]
 pub(crate) trait Bindable {
@@ -86,7 +146,7 @@ impl Display for Session {
 impl Session {
     fn new(server: Arc<SocksServer>, socket: UdpSocket, client: Option<ClientAddr>) -> Self {
         server.status.usage.open_session();
-        let session = Session {
+        Session {
             server,
             socket,
             client,
@@ -95,25 +155,24 @@ impl Session {
             created_at: Instant::now(),
             tx_bytes: Default::default(),
             rx_bytes: Default::default(),
-        };
-        debug!("Open {}", session);
-        session
+        }
     }
 
     #[instrument(skip_all, fields(buf_len=buf.len()))]
     pub(crate) async fn send_to_remote(&self, target: RemoteAddr, buf: &[u8]) -> Result<()> {
         let mut request = Vec::with_capacity(buf.len() + 22);
         request.write_all(&[0x00, 0x00, 0x00])?;
-        match target.0.ip() {
-            IpAddr::V4(ip) => {
-                request.write_all(&[ATYP_IPV4])?;
-                request.write_all(&ip.octets())?;
+        let addr = match &self.quic {
+            Some(QuicConnection {
+                remote_orig,
+                remote_name: Some(remote_name),
+            }) if remote_orig == &target => {
+                // Remote DNS resolve enabled
+                SocksDstAddr::Name(remote_name)
             }
-            IpAddr::V6(ip) => {
-                request.write_all(&[ATYP_IPV6])?;
-                request.write_all(&ip.octets())?;
-            }
-        }
+            _ => target.0.ip().into(),
+        };
+        addr.write_to(&mut request)?;
         request.write_all(&target.0.port().to_be_bytes())?;
         request.write_all(buf)?;
         let n = self.socket.send(&request).await?;
@@ -123,16 +182,16 @@ impl Session {
     }
 
     #[instrument(skip_all, fields(server=self.server.name))]
-    pub(crate) async fn recv_from(&self, mut buf: &mut [u8]) -> Result<(usize, RemoteAddr)> {
+    pub(crate) async fn recv(&self, mut buf: &mut [u8]) -> Result<usize> {
         let mut req_buf = vec![0u8; 2048];
         loop {
             req_buf.resize(2048, 0);
             let n = self.socket.recv(&mut req_buf).await?;
             req_buf.resize(n, 0);
             trace!("Received {} bytes: {:?}", n, req_buf);
-            if let Some((pkt, remote)) = decode_packet(&req_buf) {
+            if let Some((pkt, _, _)) = decode_packet(&req_buf) {
                 let n = buf.write(pkt)?;
-                return Ok((n, remote));
+                return Ok(n);
             }
         }
     }
@@ -164,13 +223,24 @@ impl Drop for Session {
 
 pub(crate) struct SessionIncoming {
     session: Weak<Session>,
+    name_to_addr: Option<(String, RemoteAddr)>,
     drop_notify: Pin<Box<dyn Future<Output = ()> + Sync + Send>>,
 }
 
 impl SessionIncoming {
     fn new(session: &Arc<Session>) -> Self {
+        let name_to_addr = if let Some(QuicConnection {
+            remote_name: Some(ref name),
+            remote_orig,
+        }) = session.quic
+        {
+            Some((name.clone(), remote_orig))
+        } else {
+            None
+        };
         Self {
             session: Arc::downgrade(session),
+            name_to_addr,
             drop_notify: Box::pin(wait_notify(session.drop_notify.clone())),
         }
     }
@@ -178,6 +248,12 @@ impl SessionIncoming {
 
 async fn wait_notify(notify: Arc<Notify>) {
     notify.notified().await
+}
+
+macro_rules! ready_io_err {
+    ($kind:ident, $err:expr) => {
+        Poll::Ready(Some(Err(io::Error::new(ErrorKind::$kind, $err))))
+    };
 }
 
 impl Stream for SessionIncoming {
@@ -202,11 +278,32 @@ impl Stream for SessionIncoming {
                 Poll::Pending => break Poll::Pending,
                 Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
                 Poll::Ready(Ok(())) => {
-                    if let Some((pkt, remote)) = decode_packet(buf.filled()) {
+                    if let Some((pkt, addr, port)) = decode_packet(buf.filled()) {
                         session
                             .rx_bytes
                             .fetch_add(pkt.len() as u64, Ordering::Relaxed);
                         session.server.status.usage.add_rx(pkt.len());
+                        let remote: RemoteAddr = match addr {
+                            SocksDstAddr::Ipv4(ip) => SocketAddr::from((ip, port)).into(),
+                            SocksDstAddr::Ipv6(ip) => SocketAddr::from((ip, port)).into(),
+                            SocksDstAddr::Name(name) => {
+                                if let Some((map_name, map_addr)) = &self.name_to_addr {
+                                    if map_name == &name {
+                                        *map_addr
+                                    } else {
+                                        break ready_io_err!(
+                                            InvalidData,
+                                            format!("Unknown name {}, expect {}", name, map_name)
+                                        );
+                                    }
+                                } else {
+                                    break ready_io_err!(
+                                        InvalidData,
+                                        "Received domain name but remote DNS not in use"
+                                    );
+                                }
+                            }
+                        };
                         break Poll::Ready(Some(Ok((remote, Bytes::copy_from_slice(pkt)))));
                     }
                 }
@@ -216,7 +313,7 @@ impl Stream for SessionIncoming {
     }
 }
 
-fn decode_packet(mut pkt: &[u8]) -> Option<(&[u8], RemoteAddr)> {
+fn decode_packet(mut pkt: &[u8]) -> Option<(&[u8], SocksDstAddr<String>, u16)> {
     if pkt.len() < 10 {
         debug!("UDP request too short");
         return None;
@@ -227,14 +324,13 @@ fn decode_packet(mut pkt: &[u8]) -> Option<(&[u8], RemoteAddr)> {
         debug!("Dropped UDP fragments");
         return None;
     }
-    let remote_ip: IpAddr = match pkt.read_u8().unwrap() {
-        ATYP_IPV4 => Ipv4Addr::from(pkt.read_u32::<BE>().unwrap()).into(),
-        ATYP_IPV6 => Ipv6Addr::from(pkt.read_u128::<BE>().unwrap()).into(),
-        _ => {
-            debug!("Unsupported address type");
+    let remote = match SocksDstAddr::read_from(&mut pkt) {
+        Ok(addr) => addr,
+        Err(err) => {
+            debug!("{}", err);
             return None;
         }
     };
-    let remote: SocketAddr = (remote_ip, pkt.read_u16::<BE>().unwrap()).into();
-    Some((pkt, remote.into()))
+    let port = pkt.read_u16::<BE>().unwrap();
+    Some((pkt, remote, port))
 }

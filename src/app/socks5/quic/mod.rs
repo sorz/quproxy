@@ -119,7 +119,7 @@ impl InitialPacket {
         let key: LessSafeKey = (&init_secret).into();
         key.open_in_place(
             init_secret.nonce(pkt_no as u64),
-            Aad::from(header.clone()),
+            Aad::from(header),
             &mut payload,
         )?;
         payload.truncate(payload.len() - 16);
