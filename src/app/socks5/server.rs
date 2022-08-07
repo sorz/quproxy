@@ -8,6 +8,7 @@ use std::{
 };
 
 use derivative::Derivative;
+use serde::Deserialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -24,11 +25,17 @@ pub(crate) struct AtomicInnerProto {
     inner: AtomicU8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub(crate) enum InnerProto {
+    #[default]
+    #[serde(alias = "auto")]
     Unspecified,
+    #[serde(alias = "ipv4")]
     IPv4,
+    #[serde(alias = "ipv6")]
     IPv6,
+    #[serde(alias = "inet")]
+    #[serde(alias = "both")]
     Inet,
 }
 
@@ -37,6 +44,14 @@ pub(crate) enum AppProto {
     IPv4,
     IPv6,
     Any,
+}
+
+impl From<InnerProto> for AtomicInnerProto {
+    fn from(proto: InnerProto) -> Self {
+        let atomic: Self = Default::default();
+        atomic.set(proto);
+        atomic
+    }
 }
 
 impl AtomicInnerProto {
@@ -87,13 +102,18 @@ pub(crate) struct SocksServer {
     pub(crate) status: ServerStatus,
 }
 
+impl From<SocketAddr> for SocksServer {
+    fn from(addr: SocketAddr) -> Self {
+        SocksServer::new(addr, addr.to_string(), InnerProto::Unspecified)
+    }
+}
+
 impl SocksServer {
-    pub(crate) fn new(udp_addr: SocketAddr, name: Option<String>) -> Self {
-        let name = name.unwrap_or_else(|| udp_addr.to_string());
+    pub(crate) fn new(udp_addr: SocketAddr, name: String, inner_proto: InnerProto) -> Self {
         Self {
             name,
             udp_addr,
-            inner_proto: Default::default(),
+            inner_proto: inner_proto.into(),
             status: Default::default(),
         }
     }
@@ -108,10 +128,14 @@ macro_rules! io_error {
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Derivative)]
+#[derivative(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SocksServerReferrer {
     pub(crate) name: String,
     pub(crate) tcp_addr: SocketAddr,
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
+    pub(crate) inner_proto: InnerProto,
 }
 
 #[derive(Debug)]
@@ -120,10 +144,19 @@ pub(crate) struct ReferredSocksServer {
     pub(crate) stream: TcpStream,
 }
 
+impl From<SocketAddr> for SocksServerReferrer {
+    fn from(addr: SocketAddr) -> Self {
+        SocksServerReferrer::new(addr, addr.to_string(), InnerProto::Unspecified)
+    }
+}
+
 impl SocksServerReferrer {
-    pub(crate) fn new(tcp_addr: SocketAddr, name: Option<String>) -> Self {
-        let name = name.unwrap_or_else(|| tcp_addr.to_string());
-        Self { name, tcp_addr }
+    pub(crate) fn new(tcp_addr: SocketAddr, name: String, inner_proto: InnerProto) -> Self {
+        Self {
+            name,
+            tcp_addr,
+            inner_proto,
+        }
     }
 
     pub(crate) async fn negotiate(&self) -> io::Result<ReferredSocksServer> {
@@ -168,7 +201,7 @@ impl SocksServerReferrer {
         let port = stream.read_u16().await?;
         let udp_addr: SocketAddr = (ip, port).into();
 
-        let server = SocksServer::new(udp_addr, Some(self.name.clone()));
+        let server = SocksServer::new(udp_addr, self.name.clone(), self.inner_proto);
         Ok(ReferredSocksServer {
             server: server.into(),
             stream,

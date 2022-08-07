@@ -30,11 +30,11 @@ impl AppContext {
     pub(crate) fn from_cli_args(args: CliArgs) -> Self {
         let mut socks5_servers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_udp)
             .into_iter()
-            .map(|addr| SocksServer::new(addr, None).into())
+            .map(|addr| Arc::new(addr.into()))
             .collect();
         let mut socks5_referrers: Vec<Arc<_>> = filter_duplicated_socket_addrs(&args.socks5_tcp)
             .into_iter()
-            .map(|addr| SocksServerReferrer::new(addr, None).into())
+            .map(|addr| Arc::new(addr.into()))
             .collect();
 
         // TODO: check duplicated socket address & name
@@ -46,6 +46,7 @@ impl AppContext {
                     protocol,
                     address,
                     enabled,
+                    inner_proto,
                 },
             ) in cfg.upstreams
             {
@@ -54,11 +55,10 @@ impl AppContext {
                 }
                 match protocol {
                     UpstreamProtocol::Socks5Udp => {
-                        socks5_servers.push(SocksServer::new(address, Some(name)).into())
+                        socks5_servers.push(SocksServer::new(address, name, inner_proto).into())
                     }
-                    UpstreamProtocol::Socks5Tcp => {
-                        socks5_referrers.push(SocksServerReferrer::new(address, Some(name)).into())
-                    }
+                    UpstreamProtocol::Socks5Tcp => socks5_referrers
+                        .push(SocksServerReferrer::new(address, name, inner_proto).into()),
                 }
             }
         }

@@ -11,6 +11,8 @@ use clap::Parser;
 use serde::Deserialize;
 use tracing::metadata::LevelFilter;
 
+use crate::app::InnerProto;
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub(crate) struct CliArgs {
@@ -113,6 +115,9 @@ pub(crate) struct Upstream {
     pub(crate) address: SocketAddr,
     #[serde(default = "bool_true")]
     pub(crate) enabled: bool,
+    #[serde(default)]
+    #[serde(alias = "inner_protocol")]
+    pub(crate) inner_proto: InnerProto,
 }
 
 impl ConfigFile {
