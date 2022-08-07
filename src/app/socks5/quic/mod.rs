@@ -42,9 +42,11 @@ impl From<Unspecified> for ParseError {
 
 impl QuicConnection {
     pub(super) fn try_from(remote: RemoteAddr, pkt: InitialPacket) -> Result<Self, ParseError> {
-        let remote_name = match pkt.crypto_message()? {
-            Some(msg) => tls::get_server_name_from_client_hello(msg),
-            None => None,
+        let crypto_msg = pkt.crypto_message()?;
+        let remote_name = if crypto_msg.is_empty() {
+            None
+        } else {
+            tls::get_server_name_from_client_hello(crypto_msg)
         };
         Ok(Self {
             remote_orig: remote,
@@ -128,11 +130,12 @@ impl InitialPacket {
         })
     }
 
-    fn crypto_message(&self) -> Result<Option<impl Buf>, ParseError> {
+    fn crypto_message(&self) -> Result<Bytes, ParseError> {
         let mut buf = self.payload.clone();
-        let mut first_msg: Option<Bytes> = None;
-        let mut msg = BytesMut::new();
-        let mut total_len = 0usize;
+        // Use `msg` for avoid copy, fallback to `msg_buf` if CRYPTO frames
+        // are non-continous.
+        let mut msg: Option<Bytes> = None;
+        let mut msg_buf = BytesMut::new();
         while buf.has_remaining() {
             let frame_type = buf[0];
             buf.advance(1);
@@ -145,24 +148,34 @@ impl InitialPacket {
                 0x06 => {
                     let pos = decode_var_int(&mut buf) as usize;
                     let len = decode_var_int(&mut buf) as usize;
-                    println!("pos {}, len {}, total {}", pos, len, total_len);
-                    if pos != total_len {
-                        // Not support for out-of-order frames
+                    if pos + len > self.payload.len() {
+                        // Prevent allocate lots of memory
                         return Err(ParseError::NotValidQuicPacket);
                     }
-                    if first_msg.is_none() {
-                        first_msg = Some(buf.slice(..len));
+                    if msg.is_none() && msg_buf.is_empty() && pos == 0 {
+                        msg = Some(buf.slice(..len));
                     } else {
-                        msg.extend_from_slice(&buf[..len]);
+                        if let Some(m) = msg {
+                            msg_buf.extend_from_slice(&m);
+                            msg = None;
+                        }
+                        if msg_buf.len() < pos + len {
+                            msg_buf.resize(pos + len, 0);
+                        }
+                        msg_buf[pos..pos + len].copy_from_slice(&buf[..len]);
                     }
-                    total_len += len;
                     buf.advance(len);
                 }
                 // Protocol violation
                 _ => return Err(ParseError::NotValidQuicPacket),
             }
         }
-        Ok(first_msg.map(|m| m.chain(msg)))
+        if let Some(msg) = msg {
+            Ok(msg)
+        } else {
+            // TODO: check gap on `msg_buf`
+            Ok(msg_buf.freeze())
+        }
     }
 }
 
@@ -253,6 +266,6 @@ fn test_decode_packet() {
     let pkt = InitialPacket::decode(Bytes::from_static(pkt)).unwrap();
     assert!(pkt.payload.starts_with(expected_payload));
 
-    let msg = pkt.crypto_message().unwrap().unwrap();
+    let msg = pkt.crypto_message().unwrap();
     assert_eq!(msg.remaining(), 241);
 }
