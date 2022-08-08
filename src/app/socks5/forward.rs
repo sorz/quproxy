@@ -10,6 +10,7 @@ use lru_time_cache::LruCache;
 use tracing::{debug, info, trace, warn};
 
 use crate::app::{
+    checking::Health,
     socks5::quic::{self, QuicConnection},
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
@@ -58,7 +59,7 @@ where
         remote: RemoteAddr,
         pkt: Bytes,
     ) -> io::Result<()> {
-        if !self.sessions.contains_key(&client) {
+        let session = if !self.sessions.contains_key(&client) {
             // Start new session
             let mut quic = None;
             if self.context.cli_args.remote_dns && pkt.len() >= quic::MIN_DATAGRAM_SIZE_BYTES {
@@ -70,11 +71,24 @@ where
                     }
                 }
             }
-            let session: Arc<Session> = self.create_session(client, remote, quic).await?.into();
+            let session: Arc<_> = self.create_session(client, remote, quic).await?.into();
             self.start_session(session.clone(), client);
-            self.sessions.insert(client, session);
-        }
-        let session = self.sessions.get(&client).expect("unreachable");
+            self.sessions.entry(client).or_insert(session)
+        } else {
+            let session = self.sessions.get(&client).unwrap();
+            // Do not migration non-QUIC session
+            if session.server.is_healthy() || session.quic.is_none() {
+                session
+            } else {
+                debug!("Migrate {:?} away from [{}]", client, session.server.name);
+                let quic = session.quic.clone();
+                let new_session: Arc<_> = self.create_session(client, remote, quic).await?.into();
+                self.start_session(new_session.clone(), client);
+                self.sessions.remove(&client);
+                self.sessions.entry(client).or_insert(new_session)
+            }
+        };
+
         trace!(
             "{:?} => {:?} via {}: {} bytes",
             client,
@@ -109,13 +123,11 @@ where
             .context
             .socks5_servers()
             .into_iter()
-            .find(|p| p.inner_proto.get().capable(proto))
+            .find(|p| p.inner_proto.get().capable(proto) && p.is_healthy())
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "No avaiable proxy"))?
             .clone();
         let mut session = proxy.bind(Some(client)).await?;
-        if let Some(quic) = quic {
-            session.set_quic(quic);
-        }
+        session.quic = quic;
         Ok(session)
     }
 

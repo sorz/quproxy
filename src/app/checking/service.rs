@@ -10,6 +10,8 @@ use crate::app::{
     AppContext,
 };
 
+use super::meter::Sampling;
+
 #[derive(Derivative, Debug)]
 pub(crate) struct CheckingService {
     #[derivative(Debug = "ignore")]
@@ -26,11 +28,21 @@ impl CheckingService {
     #[instrument(skip_all)]
     pub(crate) async fn launch(self) -> ! {
         debug!("Checking service started");
-        let mut interval = interval_at(Instant::now(), self.context.cli_args.check_interval);
-        loop {
-            interval.tick().await;
-            self.ping_all().await;
-        }
+        let mut interval_ping = interval_at(Instant::now(), self.context.cli_args.check_interval);
+        let mut interval_meter = interval_at(Instant::now(), Duration::from_secs(1));
+        let task_ping = async {
+            loop {
+                interval_ping.tick().await;
+                self.ping_all().await;
+            }
+        };
+        let task_meter = async {
+            loop {
+                interval_meter.tick().await;
+                self.meter_sampling_all().await;
+            }
+        };
+        tokio::join!(task_ping, task_meter).0
     }
 
     #[instrument(skip_all)]
@@ -96,6 +108,14 @@ impl CheckingService {
                 )
             }
         }
+    }
+
+    #[instrument(skip_all)]
+    async fn meter_sampling_all(&self) {
+        self.context
+            .socks5_servers()
+            .into_iter()
+            .for_each(|s| s.sample_traffic());
     }
 
     fn resort_servers(&self) -> Option<Arc<SocksServer>> {

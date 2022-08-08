@@ -16,7 +16,7 @@ use self::crypto::InitialSecret;
 
 pub(super) const MIN_DATAGRAM_SIZE_BYTES: usize = 1200;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct QuicConnection {
     pub(super) remote_orig: RemoteAddr,
     pub(super) remote_name: Option<String>,

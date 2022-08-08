@@ -4,10 +4,7 @@ use std::{
     io::{self, ErrorKind, Read, Result, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     pin::Pin,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Weak,
-    },
+    sync::{Arc, Weak},
     task::{Context, Poll},
     time::Instant,
 };
@@ -15,14 +12,13 @@ use std::{
 use async_trait::async_trait;
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use bytes::Bytes;
-use bytesize::ByteSize;
 use futures::{FutureExt, Stream};
 use tokio::{io::ReadBuf, net::UdpSocket, sync::Notify};
 use tracing::{debug, instrument, trace};
 
 use crate::app::types::{ClientAddr, RemoteAddr};
 
-use super::{quic::QuicConnection, SocksServer};
+use super::{quic::QuicConnection, traffic::AtomicTraffic, SocksServer};
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
@@ -117,10 +113,9 @@ pub(crate) struct Session {
     pub(crate) server: Arc<SocksServer>,
     socket: UdpSocket,
     client: Option<ClientAddr>,
-    quic: Option<QuicConnection>,
+    pub(super) quic: Option<QuicConnection>,
     pub(super) created_at: Instant,
-    pub(super) tx_bytes: AtomicU64,
-    pub(super) rx_bytes: AtomicU64,
+    pub(super) traffic: AtomicTraffic,
     drop_notify: Arc<Notify>,
 }
 
@@ -153,8 +148,7 @@ impl Session {
             quic: None,
             drop_notify: Default::default(),
             created_at: Instant::now(),
-            tx_bytes: Default::default(),
-            rx_bytes: Default::default(),
+            traffic: Default::default(),
         }
     }
 
@@ -176,8 +170,8 @@ impl Session {
         request.write_all(&target.0.port().to_be_bytes())?;
         request.write_all(buf)?;
         let n = self.socket.send(&request).await?;
-        self.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
-        self.server.status.usage.add_tx(n);
+        self.traffic.add_tx(n);
+        self.server.status.usage.traffic.add_tx(n);
         Ok(())
     }
 
@@ -199,23 +193,16 @@ impl Session {
     pub(super) fn incoming(self: &Arc<Self>) -> SessionIncoming {
         SessionIncoming::new(self)
     }
-
-    pub(super) fn set_quic(&mut self, quic: QuicConnection) {
-        self.quic = Some(quic);
-    }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let rx = *self.rx_bytes.get_mut();
-        let tx = *self.tx_bytes.get_mut();
         self.server.status.usage.close_session();
         debug!(
-            "Close {}, {:#.0?}, RX {}, TX {}",
+            "Close {}, {:#.0?}, {}",
             self,
             self.created_at.elapsed(),
-            ByteSize(rx),
-            ByteSize(tx),
+            self.traffic.get(),
         );
         self.drop_notify.notify_waiters();
     }
@@ -279,10 +266,8 @@ impl Stream for SessionIncoming {
                 Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
                 Poll::Ready(Ok(())) => {
                     if let Some((pkt, addr, port)) = decode_packet(buf.filled()) {
-                        session
-                            .rx_bytes
-                            .fetch_add(pkt.len() as u64, Ordering::Relaxed);
-                        session.server.status.usage.add_rx(pkt.len());
+                        session.traffic.add_rx(pkt.len());
+                        session.server.status.usage.traffic.add_rx(pkt.len());
                         let remote: RemoteAddr = if let Some(remote) = self.override_remote {
                             remote
                         } else {

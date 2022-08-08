@@ -9,4 +9,4 @@ pub(crate) use forward::SocksForwardService;
 pub(crate) use refer::SocksReferService;
 pub(crate) use server::{InnerProto, SocksServer, SocksServerReferrer};
 pub(super) use session::Bindable;
-pub(super) use traffic::Usage;
+pub(super) use traffic::{Traffic, Usage};
