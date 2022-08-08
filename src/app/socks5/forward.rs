@@ -10,7 +10,7 @@ use lru_time_cache::LruCache;
 use tracing::{debug, info, trace, warn};
 
 use crate::app::{
-    checking::Health,
+    checking::Healthy,
     socks5::quic::{self, QuicConnection},
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
@@ -80,7 +80,7 @@ where
             if session.server.is_healthy() || session.quic.is_none() {
                 session
             } else {
-                debug!("Migrate {:?} away from [{}]", client, session.server.name);
+                debug!("Migrating {:?} away from [{}]", client, session.server.name);
                 let quic = session.quic.clone();
                 let new_session: Arc<_> = self.create_session(client, remote, quic).await?.into();
                 self.start_session(new_session.clone(), client);
@@ -97,6 +97,8 @@ where
             session.server.name
         );
         if let Err(err) = session.send_to_remote(remote, &pkt).await {
+            session.server.set_troubleness(true);
+            // TODO: retry with new upstream?
             info!(
                 "failed to forward {} bytes packet to remote {:?} via {}: {}",
                 pkt.len(),

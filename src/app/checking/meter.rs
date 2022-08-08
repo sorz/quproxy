@@ -1,23 +1,14 @@
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Instant,
-};
-
-use parking_lot::Mutex;
-use tracing::info;
+use std::{collections::VecDeque, time::Instant};
 
 use crate::app::socks5::{SocksServer, Traffic};
 
-const MAX_SAMPLES: usize = 5;
+use super::Healthy;
+
+const MAX_SAMPLES: usize = 6;
 
 #[derive(Debug)]
 pub(crate) struct Meter {
-    samples: Mutex<VecDeque<Sample>>,
-    in_trouble: AtomicBool,
+    samples: VecDeque<Sample>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -38,30 +29,27 @@ impl From<Traffic> for Sample {
 impl Default for Meter {
     fn default() -> Self {
         Self {
-            samples: VecDeque::with_capacity(MAX_SAMPLES).into(),
-            in_trouble: false.into(),
+            samples: VecDeque::with_capacity(MAX_SAMPLES),
         }
     }
 }
 
 impl Meter {
-    fn add_sample(&self, traffic: Traffic) {
-        let mut samples = self.samples.lock();
-        while samples.len() >= MAX_SAMPLES {
-            samples.pop_front();
+    fn add_sample(&mut self, traffic: Traffic) {
+        while self.samples.len() >= MAX_SAMPLES {
+            self.samples.pop_front();
         }
-        samples.push_back(traffic.into());
+        self.samples.push_back(traffic.into());
     }
 
     fn evaluate_trouble_state(&self) -> Option<bool> {
-        let samples = self.samples.lock();
-        if samples.len() < MAX_SAMPLES {
+        if self.samples.len() < MAX_SAMPLES {
             return None;
         }
-        let mut last = *samples.front().unwrap();
+        let mut last = *self.samples.front().unwrap();
         let mut cnt_tx = 0;
         let mut cnt_rx = 0;
-        samples.iter().skip(1).copied().for_each(|cur| {
+        self.samples.iter().skip(1).copied().for_each(|cur| {
             let amt = cur.traffic - last.traffic;
             if amt.tx_bytes > 0 {
                 cnt_tx += 1;
@@ -71,16 +59,15 @@ impl Meter {
             }
             last = cur;
         });
-        // Set `in_trouble` if TX occur in all samplings while no single RX
-        if cnt_tx >= MAX_SAMPLES && cnt_rx == 0 {
-            if !self.in_trouble.swap(true, Ordering::Relaxed) {
-                return Some(true);
-            }
-        // Unset if any RX occur.
-        } else if cnt_rx > 0 && self.in_trouble.swap(false, Ordering::Relaxed) {
-            return Some(false);
+        // In trouble if TX occur in >= 1/2 samplings while no single RX
+        if cnt_tx >= MAX_SAMPLES / 2 && cnt_rx == 0 {
+            Some(true)
+        // Not in trouble if any RX occur.
+        } else if cnt_rx > 0 {
+            Some(false)
+        } else {
+            None // Undeciable
         }
-        None
     }
 }
 
@@ -88,27 +75,12 @@ pub(super) trait Sampling {
     fn sample_traffic(&self);
 }
 
-impl Sampling for Arc<SocksServer> {
+impl Sampling for SocksServer {
     fn sample_traffic(&self) {
-        let meter = &self.status.meter;
+        let mut meter = self.status.meter.lock();
         meter.add_sample(self.status.usage.traffic.get());
         if let Some(trouble) = meter.evaluate_trouble_state() {
-            if trouble {
-                info!("Upstream [{}] goes trouble", self.name);
-            } else {
-                info!("Upstream [{}] goes out of trouble", self.name);
-            }
+            self.set_troubleness(trouble);
         }
-    }
-}
-
-pub(crate) trait Health {
-    fn is_healthy(&self) -> bool;
-}
-
-impl Health for Arc<SocksServer> {
-    #[inline]
-    fn is_healthy(&self) -> bool {
-        !self.status.meter.in_trouble.load(Ordering::Relaxed)
     }
 }

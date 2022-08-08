@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use parking_lot::Mutex;
 
 use super::{
-    checking::{Meter, PingHistory},
+    checking::{Health, Meter, PingHistory},
     socks5::Usage,
 };
 
@@ -11,5 +11,6 @@ use super::{
 pub(crate) struct ServerStatus {
     pub(super) pings: Mutex<PingHistory>,
     pub(super) usage: Usage,
-    pub(super) meter: Meter,
+    pub(super) meter: Mutex<Meter>,
+    pub(super) health: Health,
 }
