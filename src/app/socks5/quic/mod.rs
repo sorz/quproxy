@@ -1,13 +1,14 @@
 mod crypto;
 mod tls;
 
-use std::io;
+use std::{cmp, io};
 
 use bytes::{Buf, Bytes, BytesMut};
 use ring::{
     aead::{quic::HeaderProtectionKey, Aad, LessSafeKey},
     error::Unspecified,
 };
+use tracing::info;
 
 use crate::app::types::RemoteAddr;
 
@@ -136,6 +137,7 @@ impl InitialPacket {
         // are non-continous.
         let mut msg: Option<Bytes> = None;
         let mut msg_buf = BytesMut::new();
+        let mut ranges = Vec::new();
         while buf.has_remaining() {
             let frame_type = buf[0];
             buf.advance(1);
@@ -157,12 +159,14 @@ impl InitialPacket {
                     } else {
                         if let Some(m) = msg {
                             msg_buf.extend_from_slice(&m);
+                            ranges.push(0..m.len());
                             msg = None;
                         }
                         if msg_buf.len() < pos + len {
                             msg_buf.resize(pos + len, 0);
                         }
                         msg_buf[pos..pos + len].copy_from_slice(&buf[..len]);
+                        ranges.push(pos..pos + len);
                     }
                     buf.advance(len);
                 }
@@ -173,7 +177,19 @@ impl InitialPacket {
         if let Some(msg) = msg {
             Ok(msg)
         } else {
-            // TODO: check gap on `msg_buf`
+            let mut len = 0;
+            ranges.sort_by_key(|r| r.start);
+            for range in ranges {
+                if range.start <= len {
+                    len = cmp::max(len, range.end);
+                } else {
+                    break;
+                }
+            }
+            if len < msg_buf.len() {
+                info!("Gap in CRYPTO frames ({}/{})", len, msg_buf.len());
+                msg_buf.truncate(len);
+            }
             Ok(msg_buf.freeze())
         }
     }
