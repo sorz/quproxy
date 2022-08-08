@@ -2,10 +2,10 @@ use std::fmt::Debug;
 
 use parking_lot::Mutex;
 
-use super::{checking::Health, socks5::Usage};
+use super::{checking::PingHistory, socks5::Usage};
 
 #[derive(Debug, Default)]
 pub(crate) struct ServerStatus {
-    pub(super) health: Mutex<Health>,
+    pub(super) pings: Mutex<PingHistory>,
     pub(super) usage: Usage,
 }

@@ -1,5 +1,5 @@
-mod health;
+mod ping;
 mod service;
 
-pub(crate) use health::Health;
+pub(crate) use ping::PingHistory;
 pub(crate) use service::CheckingService;
