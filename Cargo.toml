@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["sorz <me@sorz.org>"]
 description = "Transparent QUIC to SOCKSv5 proxy on Linux"
-license = "MIT"
+license = "GPL-3.0-or-later"
 keywords = ["proxy", "socksv5", "quic"]
-categories = ["command-line-utilities"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
