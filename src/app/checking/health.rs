@@ -39,7 +39,7 @@ impl Healthy for SocksServer {
 }
 
 impl SocksServer {
-    pub(super) async fn check_troubleness(self: Arc<Self>, context: &AppContext) {
+    pub(super) async fn check_troubleness(self: &Arc<Self>, context: &AppContext) -> bool {
         debug!("Checking [{}]", self.name);
         let dns4 = context.cli_args.check_dns_server_v4.into();
         let dns6 = context.cli_args.check_dns_server_v6.into();
@@ -56,8 +56,8 @@ impl SocksServer {
             InnerProto::IPv6 => self.ping_with_dns_query(dns6, PING_MAX_RETRY).await,
         };
         match result {
-            Err(_) | Ok(None) => self.set_troubleness(true),
-            Ok(Some(_)) => self.set_troubleness(false),
+            Err(_) | Ok(None) => true,
+            Ok(Some(_)) => false,
         }
     }
 }

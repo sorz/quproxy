@@ -4,7 +4,7 @@ use crate::app::socks5::{SocksServer, Traffic};
 
 use super::Healthy;
 
-const MAX_SAMPLES: usize = 3;
+const MAX_SAMPLES: usize = 5;
 
 #[derive(Debug)]
 pub(crate) struct Meter {
@@ -42,23 +42,28 @@ impl Meter {
         self.samples.push_back(traffic.into());
     }
 
-    fn tx_only(&self) -> bool {
-        if self.samples.len() < MAX_SAMPLES {
-            return false;
+    /// Return true if there is TX traffic but no RX traffic, excpet all TX
+    /// occur only in the latter half samples.
+    pub(super) fn tx_only(&self) -> bool {
+        let x = self.samples.front().copied();
+        let a = self.samples.get(MAX_SAMPLES / 2).copied();
+        let b = self.samples.get(MAX_SAMPLES - 1).copied();
+        if let (Some(x), Some(a), Some(b)) = (x, a, b) {
+            let head = a.traffic - x.traffic;
+            let total = b.traffic - x.traffic;
+            head.tx_bytes > 0 && total.rx_bytes == 0
+        } else {
+            false
         }
-        let first = *self.samples.front().unwrap();
-        let last = *self.samples.back().unwrap();
-        let amt = last.traffic - first.traffic;
-        amt.tx_bytes > 0 && amt.rx_bytes == 0
     }
 }
 
 pub(super) trait Sampling {
-    fn sample_traffic(&self) -> bool;
+    fn sample_traffic(&self);
 }
 
 impl Sampling for SocksServer {
-    fn sample_traffic(&self) -> bool {
+    fn sample_traffic(&self) {
         let mut meter = self.status.meter.lock();
         let sample = self.status.usage.traffic.get();
         meter.add_sample(sample);
@@ -66,6 +71,5 @@ impl Sampling for SocksServer {
             // Fast recovery from trouble
             self.set_troubleness(false);
         }
-        meter.tx_only()
     }
 }

@@ -12,6 +12,9 @@ use crate::app::{
 
 use super::meter::Sampling;
 
+const INTERVAL_METER: Duration = Duration::from_secs(1);
+const INTERVAL_HEALTH: Duration = INTERVAL_METER;
+
 #[derive(Derivative, Debug)]
 pub(crate) struct CheckingService {
     #[derivative(Debug = "ignore")]
@@ -29,7 +32,8 @@ impl CheckingService {
     pub(crate) async fn launch(self) -> ! {
         debug!("Checking service started");
         let mut interval_ping = interval_at(Instant::now(), self.context.cli_args.check_interval);
-        let mut interval_meter = interval_at(Instant::now(), Duration::from_secs(1));
+        let mut interval_meter = interval_at(Instant::now(), INTERVAL_METER);
+        let mut interval_health = interval_at(Instant::now() + INTERVAL_HEALTH, INTERVAL_HEALTH);
         let task_ping = async {
             loop {
                 interval_ping.tick().await;
@@ -42,7 +46,13 @@ impl CheckingService {
                 self.meter_sampling_all().await;
             }
         };
-        tokio::join!(task_ping, task_meter).0
+        let task_health = async {
+            loop {
+                interval_health.tick().await;
+                self.health_check_all().await;
+            }
+        };
+        tokio::join!(task_ping, task_meter, task_health).0
     }
 
     #[instrument(skip_all)]
@@ -124,16 +134,29 @@ impl CheckingService {
 
     #[instrument(skip_all)]
     async fn meter_sampling_all(&self) {
-        self.context.socks5_servers().into_iter().for_each(|proxy| {
-            if proxy.sample_traffic() && proxy.is_healthy() {
-                // Upstream maybe in trouble
+        self.context
+            .socks5_servers()
+            .iter()
+            .for_each(|p| p.sample_traffic());
+    }
+
+    #[instrument(skip_all)]
+    async fn health_check_all(&self) {
+        let checking: FuturesUnordered<_> = self
+            .context
+            .socks5_servers()
+            .into_iter()
+            .filter(|proxy| proxy.is_healthy() && proxy.status.meter.lock().tx_only())
+            .map(|proxy| {
                 let ctx = self.context.clone();
-                // FIXME: avoid duplicated spawn
-                tokio::spawn(async move {
-                    proxy.check_troubleness(&ctx).await;
-                });
-            }
-        });
+                async move {
+                    if proxy.check_troubleness(&ctx).await && proxy.status.meter.lock().tx_only() {
+                        proxy.set_troubleness(true);
+                    }
+                }
+            })
+            .collect();
+        checking.count().await;
     }
 
     fn resort_servers(&self) -> Option<Arc<SocksServer>> {
