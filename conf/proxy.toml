@@ -1,0 +1,20 @@
+# Example of quproxy server list file.
+
+[upstreams.example-01]
+# proto: "socks5_udp" or "socks5_tcp", default to "socks5_udp"
+#  - "socks5_udp": the SOCKSv5 server has a fixed UDP endpoint for clients.
+#  - "socks5_tcp": standard RFC 1928 server, use TCP to get the UDP endpoint.
+proto = "socks5_udp"
+# address: UDP or TCP endpoint (required)
+address = "127.0.0.1:2001"
+# inner_proto: "auto", "inet", "ipv4" or "ipv6", default to "auto"
+#  - "auto": auto detect
+#  - "inet": the proxy support both IPv4 & IPv6
+#  - "ipv4": IPv4 only proxy
+#  - "ipv6": IPv6 only proxy
+inner_proto = "auto"
+# enabled: true or false (default to true)
+enabled = false
+
+[upstreams.another-proxy]
+address = "127.0.0.1:2002"
