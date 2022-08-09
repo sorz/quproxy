@@ -9,7 +9,6 @@ use std::{
     time::Instant,
 };
 
-use async_trait::async_trait;
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use bytes::Bytes;
 use futures::{FutureExt, Stream};
@@ -83,15 +82,8 @@ impl SocksDstAddr<String> {
     }
 }
 
-#[async_trait]
-pub(crate) trait Bindable {
-    async fn bind(&self, client: Option<ClientAddr>) -> Result<Session>;
-    fn server_name(&self) -> &str;
-}
-
-#[async_trait]
-impl Bindable for Arc<SocksServer> {
-    async fn bind(&self, client: Option<ClientAddr>) -> Result<Session> {
+impl SocksServer {
+    pub(crate) async fn bind(self: &Arc<Self>, client: Option<ClientAddr>) -> Result<Session> {
         let bind_ip: IpAddr = match self.udp_addr.ip() {
             IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),
             IpAddr::V6(ip) if ip.is_loopback() => Ipv6Addr::LOCALHOST.into(),
@@ -102,10 +94,6 @@ impl Bindable for Arc<SocksServer> {
         socket.connect(self.udp_addr).await?;
 
         Ok(Session::new(self.clone(), socket, client))
-    }
-
-    fn server_name(&self) -> &str {
-        &self.name
     }
 }
 

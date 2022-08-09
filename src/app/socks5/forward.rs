@@ -16,10 +16,7 @@ use crate::app::{
     AppContext,
 };
 
-use super::{
-    server::AppProto,
-    session::{Bindable, Session},
-};
+use super::{server::AppProto, session::Session};
 
 pub(crate) struct SocksForwardService<I: Sink<UdpPacket>> {
     context: AppContext,

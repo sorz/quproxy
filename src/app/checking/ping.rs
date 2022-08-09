@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fmt::Display,
     io,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
@@ -9,13 +9,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::time::timeout;
+use hex_literal::hex;
+use tokio::time::{interval_at, timeout};
 use tracing::{debug, instrument, trace};
 
-use crate::app::{
-    socks5::{Bindable, SocksServer},
-    InnerProto,
-};
+use crate::app::{socks5::SocksServer, InnerProto};
 
 const DELAY_POWER: f32 = 0.75;
 const DELAY_MAX_HISTORY: usize = 100;
@@ -100,6 +98,35 @@ impl PingHistory {
         }
     }
 
+    /// Assume exponential distribution for round-trip time (RTT):
+    /// RTT = base + D, where D ~ Exp(λ), base is a constant over observation.
+    ///
+    /// This method is a inverse distribution function over the RTT
+    /// distribution fitted by observed pings.  
+    pub(crate) fn quantile_delay(&self, quantile: f32) -> Option<Duration> {
+        assert!(quantile > 0f32 && quantile < 1f32);
+        let pings: Vec<_> = self
+            .pings
+            .iter()
+            .copied()
+            .flatten()
+            .map(|t| t.as_millis() as f32)
+            .collect();
+        if pings.len() < 3 {
+            return None;
+        }
+        let exp = statistical::mean(&pings);
+        let var = statistical::variance(&pings, Some(exp));
+        // Var[D] = 1/λ^2, Var[D] = Var[RTT]
+        //   => λ = sqrt(1/Var[RTT])
+        // base = E[RTT] - E[D] = E[RTT] - 1/λ
+        let λ = (1f32 / var).sqrt();
+        let base = exp - (1f32 / λ);
+        // Inverse CDF: -ln(1-p)/λ
+        let millis = -(1f32 - quantile).ln() / λ;
+        Some(Duration::from_secs_f32((base + millis) / 1000f32))
+    }
+
     pub(super) fn score(&self) -> i16 {
         if let Some(delay) = self.average_delay() {
             let delay_ms = delay.as_millis().clamp(10, 2000) as f32;
@@ -113,83 +140,125 @@ impl PingHistory {
 }
 
 #[async_trait]
-pub(super) trait Pingable: Bindable {
-    #[instrument(skip_all, fields(server=self.server_name(), dns=?dns_addr))]
+pub(super) trait Pingable {
     async fn ping_with_dns_query(
         &self,
         dns_addr: SocketAddr,
-        max_wait: Duration,
-    ) -> io::Result<Duration> {
-        trace!("Checking DNS query delay");
-        // Construct DNS query for A record of "." (root)
-        let query: [u8; 17] = [
-            rand::random(),
-            rand::random(), // transcation ID
-            1,
-            32, // standard query
-            0,
-            1, // one query
-            0,
-            0, // zero answer
-            0,
-            0, // zero authority
-            0,
-            0, // zero addition
-            0, // query: root
-            0,
-            1, // query: type A
-            0,
-            1, // query: class IN
-        ];
-        let parse_tid = |req: &[u8]| (req[0] as u16) << 8 | (req[1] as u16);
-        let query_tid = parse_tid(&query);
+        count: usize,
+    ) -> io::Result<Option<Duration>>;
 
-        // Send query & receive reply
-        let t0 = Instant::now();
+    async fn probe_inner_proto(&self, dns4: SocketAddrV4, dns6: SocketAddrV6) -> InnerProto;
+}
+
+#[async_trait]
+impl Pingable for Arc<SocksServer> {
+    #[instrument(skip_all, fields(server=self.name, dns=?dns_addr))]
+    async fn ping_with_dns_query(
+        &self,
+        dns_addr: SocketAddr,
+        count: usize,
+    ) -> io::Result<Option<Duration>> {
+        // Generate unique transcation IDs
+        let tids: Vec<_> = {
+            let mut set: HashSet<u16> = HashSet::with_capacity(count);
+            while set.len() < count {
+                set.insert(rand::random());
+            }
+            set.into_iter().collect()
+        };
+
+        let (wait_send, wait_last) = {
+            let pings = self.status.pings.lock();
+            match (pings.quantile_delay(0.5), pings.quantile_delay(0.95)) {
+                (Some(a), Some(b)) => (a, b),
+                _ => (Duration::from_millis(200), Duration::from_millis(2000)),
+            }
+        };
+        trace!("wait_send {:#.1?}, wait_last {:#.1?}", wait_send, wait_last);
+
+        let session: Arc<_> = self.bind(None).await?.into();
+
+        // Send queries
+        let tid_send = tids.clone();
+        let session_clone = session.clone();
+        let mut send_inverval = interval_at(Instant::now().into(), wait_send);
+        let task_send = async move {
+            for tid in tid_send {
+                send_inverval.tick().await;
+                // Construct DNS query for A record of "." (root)
+                let mut query = hex!("0000 0120 0001 0000 0000 0000 00 0001 0001");
+                query[0] = (tid >> 8) as u8;
+                query[1] = (tid & 0xff) as u8;
+                trace!("Send DNS query: {:?}", query);
+                session_clone
+                    .send_to_remote(dns_addr.into(), &query)
+                    .await?;
+            }
+            Ok(())
+        };
+
+        // Receive replies
         let mut buf = [0u8; 12];
-        let n = timeout(max_wait, async {
-            let proxy = self.bind(None).await?;
-            trace!("Send DNS query: {:?}", query);
-            proxy.send_to_remote(dns_addr.into(), &query).await?;
-            proxy.recv(&mut buf).await
-        })
-        .await??;
+        let task_recv = async move {
+            let t0 = Instant::now();
+            timeout(wait_send * (count as u32 - 1) + wait_last, async {
+                loop {
+                    let n = match session.recv(&mut buf).await {
+                        Ok(n) => n,
+                        Err(err) => break Err(err),
+                    };
+                    if n < buf.len() {
+                        debug!("DNS reply too short ({} bytes)", n);
+                        continue;
+                    }
+                    trace!("Recevied DNS reply (first {}B): {:?}", buf.len(), &buf[..n]);
+                    let tid = (buf[0] as u16) << 8 | (buf[1] as u16);
+                    if let Some(n) = tids.iter().position(|t| t == &tid) {
+                        let delay = t0.elapsed() - wait_send * (n as u32);
+                        break Ok((n, delay));
+                    } else {
+                        debug!("Unknown transcation ID ({})", tid);
+                        continue;
+                    }
+                }
+            })
+            .await
+        };
 
-        // Validate reply
-        if n < 12 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "DNS reply too short",
-            ));
-        }
-        trace!("Recevied DNS reply (truncated): {:?}", &buf[..n]);
-        if query_tid != parse_tid(&buf[..n]) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "broken DNS reply received",
-            ));
-        }
-        Ok(t0.elapsed())
+        let (loss, delay) = tokio::select! {
+            Err(err) = task_send => return Err(err),
+            result = task_recv => match result {
+                Ok(Err(err)) => return Err(err),
+                Ok(Ok((loss, delay))) => {
+                    trace!("[{}] Ping: {:#.1?}, lost {}", self.name, delay, loss);
+                    (loss, Some(delay))
+                },
+                Err(_) => {
+                    trace!("[{}] Ping: {}/{} lost", self.name, count, count);
+                    (count - 1, None)
+                }
+            },
+        };
+        let mut pings = self.status.pings.lock();
+        (0..loss).for_each(|_| pings.add_measurement(None));
+        pings.add_measurement(delay.map(Delay::from));
+        Ok(delay)
     }
 
-    #[instrument(skip_all, fields(server=self.server_name()))]
-    async fn probe_inner_proto(
-        &self,
-        dns4: SocketAddrV4,
-        dns6: SocketAddrV6,
-        rtt: Duration,
-    ) -> InnerProto {
-        // False rate = p^N * (1-p)^N, where p is packet loss rate
+    #[instrument(skip_all, fields(server=self.name))]
+    async fn probe_inner_proto(&self, dns4: SocketAddrV4, dns6: SocketAddrV6) -> InnerProto {
+        // False rate = p^N * (1-p)^N, where p = (packet loss rate)^R
+        // Fail rate = TODO
         const N: usize = 3; // Max false rate (when p = 0.5) is 0.5^(3 * 2) = 1.6%
-        let max_wait = rtt * 2;
+        const R: usize = 3;
         let mut v4_ok_cnt = 0usize;
         let mut v6_ok_cnt = 0usize;
         let mut test_cnt = 0usize;
         for _ in 0..N {
             test_cnt += 1;
             tokio::select! {
-                Ok(_) = self.ping_with_dns_query(dns4.into(), max_wait) => v4_ok_cnt += 1,
-                Ok(_) = self.ping_with_dns_query(dns6.into(), max_wait) => v6_ok_cnt += 1,
+                Ok(_) = self.ping_with_dns_query(dns4.into(), R) => v4_ok_cnt += 1,
+                Ok(_) = self.ping_with_dns_query(dns6.into(), R) => v6_ok_cnt += 1,
                 else => (),
             }
             if v4_ok_cnt > 0 && v6_ok_cnt > 0 {
@@ -208,5 +277,3 @@ pub(super) trait Pingable: Bindable {
         }
     }
 }
-
-impl Pingable for Arc<SocksServer> {}
