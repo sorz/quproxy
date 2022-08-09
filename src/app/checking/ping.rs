@@ -115,8 +115,8 @@ impl PingHistory {
         if pings.len() < 3 {
             return None;
         }
-        let exp = statistical::mean(&pings);
-        let var = statistical::variance(&pings, Some(exp));
+        let exp = mean(&pings);
+        let var = variance(&pings, exp);
         // Var[D] = 1/λ^2, Var[D] = Var[RTT]
         //   => λ = sqrt(1/Var[RTT])
         // base = E[RTT] - E[D] = E[RTT] - 1/λ
@@ -137,6 +137,19 @@ impl PingHistory {
             i16::MAX
         }
     }
+}
+
+fn mean(xs: &[f32]) -> f32 {
+    xs.iter().fold(0f32, |acc, elem| acc + *elem) / xs.len() as f32
+}
+
+fn variance(xs: &[f32], xbar: f32) -> f32 {
+    let sum = xs
+        .iter()
+        .copied()
+        .map(|x| (x - xbar) * (x - xbar))
+        .fold(0f32, |acc, elem| acc + elem);
+    sum / (xs.len() as f32 - 1.0)
 }
 
 #[async_trait]
