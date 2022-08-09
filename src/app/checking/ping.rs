@@ -121,10 +121,10 @@ impl PingHistory {
         //   => λ = sqrt(1/Var[RTT])
         // base = E[RTT] - E[D] = E[RTT] - 1/λ
         let λ = (1f32 / var).sqrt();
-        let base = exp - (1f32 / λ);
+        let base = (exp - (1.0 / λ)).clamp(5.0, f32::MAX);
         // Inverse CDF: -ln(1-p)/λ
-        let millis = -(1f32 - quantile).ln() / λ;
-        Some(Duration::from_secs_f32((base + millis) / 1000f32))
+        let millis = -(1.0 - quantile).ln() / λ;
+        Some(Duration::from_secs_f32((base + millis) / 1000.0))
     }
 
     pub(super) fn score(&self) -> i16 {
