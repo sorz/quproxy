@@ -12,8 +12,9 @@ Features:
 - Full IPv6 support (auto detect)
 
 TODOs:
-[] Status page
-[] Metrics exporter
-[] UDP batch read/write
-[] Configure file reload
-[] Aggressive retry / try-in-parallel handshaking
+- [ ] Status page
+- [ ] Metrics exporter
+- [ ] UDP batch read/write
+- [ ] Configure file reload
+- [ ] QUIC connection state management
+- [ ] Aggressive retry / try-in-parallel handshaking
