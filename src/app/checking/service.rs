@@ -5,14 +5,12 @@ use tokio::time::{interval_at, Instant};
 use tracing::{debug, info, instrument, trace};
 
 use crate::app::{
-    checking::{ping::Pingable, Healthy},
+    checking::{ping::Pingable, Healthy, PING_MAX_RETRY},
     socks5::{InnerProto, SocksServer},
     AppContext,
 };
 
 use super::meter::Sampling;
-
-const PING_MAX_RETRY: usize = 8;
 
 #[derive(Derivative, Debug)]
 pub(crate) struct CheckingService {
@@ -126,10 +124,16 @@ impl CheckingService {
 
     #[instrument(skip_all)]
     async fn meter_sampling_all(&self) {
-        self.context
-            .socks5_servers()
-            .into_iter()
-            .for_each(|s| s.sample_traffic());
+        self.context.socks5_servers().into_iter().for_each(|proxy| {
+            if proxy.sample_traffic() && proxy.is_healthy() {
+                // Upstream maybe in trouble
+                let ctx = self.context.clone();
+                // FIXME: avoid duplicated spawn
+                tokio::spawn(async move {
+                    proxy.check_troubleness(&ctx).await;
+                });
+            }
+        });
     }
 
     fn resort_servers(&self) -> Option<Arc<SocksServer>> {

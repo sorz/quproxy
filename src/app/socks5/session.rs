@@ -172,6 +172,8 @@ impl Session {
             req_buf.resize(n, 0);
             trace!("Received {} bytes: {:?}", n, req_buf);
             if let Some((pkt, _, _)) = decode_packet(&req_buf) {
+                self.traffic.add_rx(pkt.len());
+                self.server.status.usage.traffic.add_rx(pkt.len());
                 let n = buf.write(pkt)?;
                 return Ok(n);
             }

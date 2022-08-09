@@ -1,8 +1,13 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
-use tracing::info;
+use tracing::{debug, info};
 
-use crate::app::socks5::SocksServer;
+use crate::app::{checking::PING_MAX_RETRY, socks5::SocksServer, AppContext, InnerProto};
+
+use super::ping::Pingable;
 
 #[derive(Debug, Default)]
 pub(crate) struct Health {
@@ -30,5 +35,29 @@ impl Healthy for SocksServer {
             (true, false) => info!("Upstream [{}] goes out of trouble", self.name),
             _ => (),
         };
+    }
+}
+
+impl SocksServer {
+    pub(super) async fn check_troubleness(self: Arc<Self>, context: &AppContext) {
+        debug!("Checking [{}]", self.name);
+        let dns4 = context.cli_args.check_dns_server_v4.into();
+        let dns6 = context.cli_args.check_dns_server_v6.into();
+        let result = match self.inner_proto.get() {
+            InnerProto::Unspecified => {
+                tokio::select! {
+                    r = self.ping_with_dns_query(dns4, PING_MAX_RETRY) => r,
+                    r = self.ping_with_dns_query(dns6, PING_MAX_RETRY) => r,
+                }
+            }
+            InnerProto::IPv4 | InnerProto::Inet => {
+                self.ping_with_dns_query(dns4, PING_MAX_RETRY).await
+            }
+            InnerProto::IPv6 => self.ping_with_dns_query(dns6, PING_MAX_RETRY).await,
+        };
+        match result {
+            Err(_) | Ok(None) => self.set_troubleness(true),
+            Ok(Some(_)) => self.set_troubleness(false),
+        }
     }
 }

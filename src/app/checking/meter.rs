@@ -4,7 +4,7 @@ use crate::app::socks5::{SocksServer, Traffic};
 
 use super::Healthy;
 
-const MAX_SAMPLES: usize = 6;
+const MAX_SAMPLES: usize = 3;
 
 #[derive(Debug)]
 pub(crate) struct Meter {
@@ -42,45 +42,30 @@ impl Meter {
         self.samples.push_back(traffic.into());
     }
 
-    fn evaluate_trouble_state(&self) -> Option<bool> {
+    fn tx_only(&self) -> bool {
         if self.samples.len() < MAX_SAMPLES {
-            return None;
+            return false;
         }
-        let mut last = *self.samples.front().unwrap();
-        let mut cnt_tx = 0;
-        let mut cnt_rx = 0;
-        self.samples.iter().skip(1).copied().for_each(|cur| {
-            let amt = cur.traffic - last.traffic;
-            if amt.tx_bytes > 0 {
-                cnt_tx += 1;
-            }
-            if amt.rx_bytes > 0 {
-                cnt_rx += 1;
-            }
-            last = cur;
-        });
-        // In trouble if TX occur in >= 1/2 samplings while no single RX
-        if cnt_tx >= MAX_SAMPLES / 2 && cnt_rx == 0 {
-            Some(true)
-        // Not in trouble if any RX occur.
-        } else if cnt_rx > 0 {
-            Some(false)
-        } else {
-            None // Undeciable
-        }
+        let first = *self.samples.front().unwrap();
+        let last = *self.samples.back().unwrap();
+        let amt = last.traffic - first.traffic;
+        amt.tx_bytes > 0 && amt.rx_bytes == 0
     }
 }
 
 pub(super) trait Sampling {
-    fn sample_traffic(&self);
+    fn sample_traffic(&self) -> bool;
 }
 
 impl Sampling for SocksServer {
-    fn sample_traffic(&self) {
+    fn sample_traffic(&self) -> bool {
         let mut meter = self.status.meter.lock();
-        meter.add_sample(self.status.usage.traffic.get());
-        if let Some(trouble) = meter.evaluate_trouble_state() {
-            self.set_troubleness(trouble);
+        let sample = self.status.usage.traffic.get();
+        meter.add_sample(sample);
+        if sample.rx_bytes > 0 {
+            // Fast recovery from trouble
+            self.set_troubleness(false);
         }
+        meter.tx_only()
     }
 }

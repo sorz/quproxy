@@ -7,3 +7,5 @@ pub(crate) use health::{Health, Healthy};
 pub(crate) use meter::Meter;
 pub(crate) use ping::PingHistory;
 pub(crate) use service::CheckingService;
+
+const PING_MAX_RETRY: usize = 8;
