@@ -1,14 +1,18 @@
-use std::io;
+use std::{io, pin::Pin};
 
 use bytes::Bytes;
 use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::trace;
+use tracing::{debug, trace, warn};
 
-use crate::app::{types::UdpPacket, AppContext};
+use crate::app::{
+    tproxy::socket::Message,
+    types::{ClientAddr, RemoteAddr, UdpPacket},
+    AppContext,
+};
 
-use super::socket::AsyncUdpSocket;
+use super::socket::{AsyncUdpSocket, MsgArrayBuffer};
 
 pub(crate) struct TProxyReceiver {
     context: AppContext,
@@ -27,24 +31,41 @@ impl TProxyReceiver {
 
     pub(crate) fn incoming_packets(self) -> impl Stream<Item = UdpPacket> {
         let (sender, receiver) = mpsc::channel(16);
-        let mut buf = [0u8; 2048];
         tokio::spawn(async move {
+            let mut buf: Pin<Box<MsgArrayBuffer<8, 2048>>> = MsgArrayBuffer::new();
             loop {
-                let (n, client, remote) = self
-                    .tproxy_socket
-                    .recv_msg(&mut buf)
+                buf.clear();
+                self.tproxy_socket
+                    .batch_recv(&mut buf)
                     .await
                     .expect("Error on read TProxy socket");
-                trace!(
-                    "Received from TProxy: {:?} => {:?}, {} bytes",
-                    client,
-                    remote,
-                    n
-                );
-                sender
-                    .send((client, remote, Bytes::copy_from_slice(&buf[..n])))
-                    .await
-                    .expect("Error on send incoming packet");
+                if buf.len() > 1 {
+                    // FIXME: remove it
+                    debug!("Batch recv {} messages", buf.len());
+                }
+                for Message {
+                    src_addr,
+                    dst_addr,
+                    buf,
+                } in buf.iter()
+                {
+                    if let (Some(src), Some(dst)) = (src_addr, dst_addr) {
+                        let client: ClientAddr = src.into();
+                        let remote: RemoteAddr = dst.into();
+                        trace!(
+                            "Received from TProxy: {:?} => {:?}, {} bytes",
+                            client,
+                            remote,
+                            buf.len(),
+                        );
+                        sender
+                            .send((client, remote, Bytes::copy_from_slice(buf)))
+                            .await
+                            .expect("Error on send incoming packet");
+                    } else {
+                        warn!("Missing src/dst address from TProxy socket");
+                    }
+                }
             }
         });
 

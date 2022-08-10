@@ -1,8 +1,10 @@
 use std::{
-    io::{self, ErrorKind, IoSliceMut},
+    io::{self, ErrorKind},
+    marker::PhantomPinned,
     mem,
     net::SocketAddr,
     os::unix::prelude::AsRawFd,
+    pin::Pin,
     ptr,
 };
 
@@ -11,7 +13,7 @@ use nix::errno::Errno;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
 
-use crate::app::types::{ClientAddr, RemoteAddr};
+use crate::app::types::ClientAddr;
 
 pub(crate) struct AsyncUdpSocket {
     inner: AsyncFd<Socket>,
@@ -39,13 +41,13 @@ impl AsyncUdpSocket {
         AsyncUdpSocket::bind(sock, addr)
     }
 
-    pub(crate) async fn recv_msg(
+    pub(crate) async fn batch_recv<const N: usize, const M: usize>(
         &self,
-        buf: &mut [u8],
-    ) -> io::Result<(usize, ClientAddr, RemoteAddr)> {
+        buf: &mut Pin<Box<MsgArrayBuffer<N, M>>>,
+    ) -> io::Result<()> {
         loop {
             let mut guard = self.inner.readable().await?;
-            match guard.try_io(|inner| recv_msg(inner, buf)) {
+            match guard.try_io(|inner| recv_mmsg(inner, buf)) {
                 Ok(result) => break result,
                 Err(_would_block) => continue,
             }
@@ -87,33 +89,98 @@ fn send_to<T: AsRawFd>(fd: &T, buf: &[u8], target: SocketAddr) -> io::Result<usi
     Ok(len)
 }
 
-fn recv_msg<T: AsRawFd>(fd: &T, buf: &mut [u8]) -> io::Result<(usize, ClientAddr, RemoteAddr)> {
-    let iov = [IoSliceMut::new(buf)];
-    let mut ctrl_buf = [0u8; 128];
+pub(crate) struct MsgArrayBuffer<const N: usize, const M: usize> {
+    msg_cnt: usize,
+    msgs: [libc::mmsghdr; N], // contains ptr to `addrs`, `ctrls`, and `iovecs`
+    addrs: [libc::sockaddr_storage; N],
+    ctrls: [[u8; 128]; N],
+    iovecs: [libc::iovec; N], // contains ptr to `bufs`
+    bufs: [[u8; M]; N],
+    _pin: PhantomPinned,
+}
 
-    let mut src_sockaddr: libc::sockaddr_storage = unsafe { mem::zeroed() };
-    let mut msghdr = libc::msghdr {
-        msg_name: &mut src_sockaddr as *mut _ as *mut _,
-        msg_namelen: mem::size_of_val(&src_sockaddr) as libc::socklen_t,
-        msg_iov: iov.as_ref().as_ptr() as *mut libc::iovec,
-        msg_iovlen: iov.as_ref().len() as libc::size_t,
-        msg_control: ctrl_buf.as_mut_ptr() as *mut _,
-        msg_controllen: ctrl_buf.len() as libc::size_t,
-        msg_flags: 0,
-    };
+// Safety: all raw pointers are self-referential.
+unsafe impl<const N: usize, const M: usize> Send for MsgArrayBuffer<N, M> {}
+// Safety: no interior mutability
+unsafe impl<const N: usize, const M: usize> Sync for MsgArrayBuffer<N, M> {}
 
-    let ret = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msghdr, 0) };
-    let len = Errno::result(ret)? as usize;
+pub(crate) struct Message<'a> {
+    pub(crate) src_addr: Option<SocketAddr>,
+    pub(crate) dst_addr: Option<SocketAddr>,
+    pub(crate) buf: &'a [u8],
+}
 
-    let src_addr = unsafe { SockAddr::new(src_sockaddr, msghdr.msg_namelen) };
-    let dst_addr = parse_dest_addr_from_cmsg(&msghdr)?;
-    match (src_addr.as_socket(), dst_addr.as_socket()) {
-        (Some(src), Some(dst)) => Ok((len, src.into(), dst.into())),
-        _ => Err(io::Error::new(
-            ErrorKind::NotFound,
-            "missing ip/ip6 address",
-        )),
+impl<const N: usize, const M: usize> MsgArrayBuffer<N, M> {
+    pub(crate) fn new() -> Pin<Box<Self>> {
+        unsafe {
+            let mut boxed = Box::pin(mem::zeroed());
+            let mut_pin: Pin<&mut Self> = Pin::as_mut(&mut boxed);
+            let mut_ref = mut_pin.get_unchecked_mut();
+            for i in 0..N {
+                mut_ref.iovecs[i] = libc::iovec {
+                    iov_base: &mut mut_ref.bufs[i] as *mut _ as *mut _,
+                    iov_len: mut_ref.bufs[i].len(),
+                };
+                mut_ref.msgs[i].msg_hdr = libc::msghdr {
+                    msg_name: &mut mut_ref.addrs[i] as *mut _ as *mut _,
+                    msg_namelen: mem::size_of_val(&mut_ref.addrs[i]) as libc::socklen_t,
+                    msg_iov: &mut mut_ref.iovecs[i] as *mut _ as *mut _,
+                    msg_iovlen: 1,
+                    msg_control: &mut mut_ref.ctrls[i] as *mut _ as *mut _,
+                    msg_controllen: mut_ref.ctrls[i].len(),
+                    msg_flags: 0,
+                };
+            }
+            boxed
+        }
     }
+
+    pub(crate) fn iter<'a>(self: &'a Pin<Box<Self>>) -> impl ExactSizeIterator<Item = Message<'a>> {
+        (0..self.msg_cnt).map(|i| {
+            let src_addr =
+                unsafe { SockAddr::new(self.addrs[i], self.msgs[i].msg_hdr.msg_namelen) };
+            let dst_addr = parse_dest_addr_from_cmsg(&self.msgs[i].msg_hdr).ok();
+            Message {
+                src_addr: src_addr.as_socket(),
+                dst_addr: dst_addr.and_then(|d| d.as_socket()),
+                buf: &self.bufs[i][..self.msgs[i].msg_len as usize],
+            }
+        })
+    }
+
+    pub(crate) fn clear(self: &mut Pin<Box<Self>>) {
+        let mut_pin = Pin::as_mut(self);
+        unsafe {
+            mut_pin.get_unchecked_mut().msg_cnt = 0;
+        }
+    }
+
+    pub(crate) fn len(self: &Pin<Box<Self>>) -> usize {
+        self.msg_cnt
+    }
+}
+
+fn recv_mmsg<const N: usize, const M: usize, T>(
+    fd: &T,
+    buf: &mut Pin<Box<MsgArrayBuffer<N, M>>>,
+) -> io::Result<()>
+where
+    T: AsRawFd,
+{
+    let mut_pin = Pin::as_mut(buf);
+    unsafe {
+        let mut_ref = mut_pin.get_unchecked_mut();
+        mut_ref.msg_cnt = 0;
+        let ret = libc::recvmmsg(
+            fd.as_raw_fd(),
+            mut_ref.msgs.as_mut_ptr(),
+            mut_ref.msgs.len().try_into().unwrap(),
+            0,
+            ptr::null_mut(),
+        );
+        mut_ref.msg_cnt = Errno::result(ret)? as usize;
+    };
+    Ok(())
 }
 
 fn parse_dest_addr_from_cmsg(msghdr: &libc::msghdr) -> io::Result<SockAddr> {
