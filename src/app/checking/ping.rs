@@ -9,6 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use hex_literal::hex;
 use tokio::time::{interval_at, timeout};
 use tracing::{debug, instrument, trace};
@@ -211,20 +212,20 @@ impl Pingable for Arc<SocksServer> {
         };
 
         // Receive replies
-        let mut buf = [0u8; 12];
+        let mut incoming = Box::pin(session.incoming());
         let task_recv = async move {
             let t0 = Instant::now();
             timeout(wait_send * (count as u32 - 1) + wait_last, async {
                 loop {
-                    let n = match session.recv(&mut buf).await {
-                        Ok(n) => n,
+                    let buf = match incoming.next().await.unwrap() {
+                        Ok((_, buf)) => buf,
                         Err(err) => break Err(err),
                     };
-                    if n < buf.len() {
-                        debug!("DNS reply too short ({} bytes)", n);
+                    if buf.len() < 12 {
+                        debug!("DNS reply too short ({} bytes)", buf.len());
                         continue;
                     }
-                    trace!("Recevied DNS reply (first {}B): {:?}", buf.len(), &buf[..n]);
+                    trace!("Recevied DNS reply: {:?}", &buf);
                     let tid = (buf[0] as u16) << 8 | (buf[1] as u16);
                     if let Some(n) = tids.iter().position(|t| t == &tid) {
                         let delay = t0.elapsed() - wait_send * (n as u32);

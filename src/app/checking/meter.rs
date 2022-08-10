@@ -13,14 +13,14 @@ pub(crate) struct Meter {
 
 #[derive(Debug, Clone, Copy)]
 struct Sample {
-    time: Instant,
+    _time: Instant,
     traffic: Traffic,
 }
 
 impl From<Traffic> for Sample {
     fn from(traffic: Traffic) -> Self {
         Self {
-            time: Instant::now(),
+            _time: Instant::now(),
             traffic,
         }
     }

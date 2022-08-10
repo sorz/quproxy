@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     io::{self, ErrorKind},
     marker::PhantomPinned,
@@ -6,14 +7,14 @@ use std::{
     os::unix::prelude::AsRawFd,
     pin::Pin,
     ptr,
+    task::{Context, Poll},
 };
 
+use futures::ready;
 use libc::{setsockopt, IPPROTO_IP, IPPROTO_IPV6, IPV6_RECVORIGDSTADDR, IP_RECVORIGDSTADDR};
 use nix::errno::Errno;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use tokio::io::unix::AsyncFd;
-
-use crate::app::types::ClientAddr;
+use tokio::{io::unix::AsyncFd, net::UdpSocket};
 
 pub(crate) struct AsyncUdpSocket {
     inner: AsyncFd<Socket>,
@@ -54,14 +55,49 @@ impl AsyncUdpSocket {
         }
     }
 
-    pub(crate) async fn send_to(&self, buf: &[u8], target: ClientAddr) -> io::Result<usize> {
+    pub(crate) fn poll_batch_recv<const N: usize, const M: usize>(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut Pin<Box<MsgArrayBuffer<N, M>>>,
+    ) -> Poll<io::Result<()>> {
+        match ready!(self.inner.poll_read_ready(cx)) {
+            Err(err) => Poll::Ready(Err(err)),
+            Ok(mut guard) => match guard.try_io(|inner| recv_mmsg(inner, buf)) {
+                Ok(result) => Poll::Ready(result),
+                Err(_would_block) => Poll::Pending,
+            },
+        }
+    }
+
+    pub(crate) async fn send_to(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
         loop {
             let mut guard = self.inner.writable().await?;
-            match guard.try_io(|inner| send_to(inner, buf, target.0)) {
+            match guard.try_io(|inner| send_to(inner, buf, target)) {
                 Ok(result) => break result,
                 Err(_would_block) => continue,
             }
         }
+    }
+
+    pub(crate) async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.inner.writable().await?;
+            match guard.try_io(|inner| send(inner, buf)) {
+                Ok(result) => break result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+}
+
+impl TryFrom<UdpSocket> for AsyncUdpSocket {
+    type Error = io::Error;
+
+    fn try_from(value: UdpSocket) -> Result<Self, Self::Error> {
+        let socket = value.into_std()?.into();
+        Ok(Self {
+            inner: AsyncFd::new(socket)?,
+        })
     }
 }
 
@@ -85,6 +121,12 @@ fn send_to<T: AsRawFd>(fd: &T, buf: &[u8], target: SocketAddr) -> io::Result<usi
             target.len(),
         )
     };
+    let len = Errno::result(ret)? as usize;
+    Ok(len)
+}
+
+fn send<T: AsRawFd>(fd: &T, buf: &[u8]) -> io::Result<usize> {
+    let ret = unsafe { libc::send(fd.as_raw_fd(), buf.as_ptr().cast(), buf.len(), 0) };
     let len = Errno::result(ret)? as usize;
     Ok(len)
 }
@@ -136,16 +178,7 @@ impl<const N: usize, const M: usize> MsgArrayBuffer<N, M> {
     }
 
     pub(crate) fn iter<'a>(self: &'a Pin<Box<Self>>) -> impl ExactSizeIterator<Item = Message<'a>> {
-        (0..self.msg_cnt).map(|i| {
-            let src_addr =
-                unsafe { SockAddr::new(self.addrs[i], self.msgs[i].msg_hdr.msg_namelen) };
-            let dst_addr = parse_dest_addr_from_cmsg(&self.msgs[i].msg_hdr).ok();
-            Message {
-                src_addr: src_addr.as_socket(),
-                dst_addr: dst_addr.and_then(|d| d.as_socket()),
-                buf: &self.bufs[i][..self.msgs[i].msg_len as usize],
-            }
-        })
+        (0..self.msg_cnt).map(|i| self.get(i))
     }
 
     pub(crate) fn clear(self: &mut Pin<Box<Self>>) {
@@ -157,6 +190,20 @@ impl<const N: usize, const M: usize> MsgArrayBuffer<N, M> {
 
     pub(crate) fn len(self: &Pin<Box<Self>>) -> usize {
         self.msg_cnt
+    }
+
+    pub(crate) fn get<'a>(self: &'a Pin<Box<Self>>, idx: usize) -> Message<'a> {
+        if idx >= self.msg_cnt {
+            panic!("out of index");
+        }
+        let src_addr =
+            unsafe { SockAddr::new(self.addrs[idx], self.msgs[idx].msg_hdr.msg_namelen) };
+        let dst_addr = parse_dest_addr_from_cmsg(&self.msgs[idx].msg_hdr).ok();
+        Message {
+            src_addr: src_addr.as_socket(),
+            dst_addr: dst_addr.and_then(|d| d.as_socket()),
+            buf: &self.bufs[idx][..self.msgs[idx].msg_len as usize],
+        }
     }
 }
 

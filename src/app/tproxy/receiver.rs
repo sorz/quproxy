@@ -4,18 +4,16 @@ use bytes::Bytes;
 use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, trace, warn};
+use tracing::{info, trace, warn};
 
 use crate::app::{
-    tproxy::socket::Message,
+    net::{AsyncUdpSocket, Message, MsgArrayBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
 
-use super::socket::{AsyncUdpSocket, MsgArrayBuffer};
-
 pub(crate) struct TProxyReceiver {
-    context: AppContext,
+    _context: AppContext,
     tproxy_socket: AsyncUdpSocket,
 }
 
@@ -24,7 +22,7 @@ impl TProxyReceiver {
         let bind_addr = (context.cli_args.host, context.cli_args.port).into();
         let tproxy_socket = AsyncUdpSocket::bind_tproxy(&bind_addr)?;
         Ok(Self {
-            context: context.clone(),
+            _context: context.clone(),
             tproxy_socket,
         })
     }
@@ -32,16 +30,17 @@ impl TProxyReceiver {
     pub(crate) fn incoming_packets(self) -> impl Stream<Item = UdpPacket> {
         let (sender, receiver) = mpsc::channel(16);
         tokio::spawn(async move {
-            let mut buf: Pin<Box<MsgArrayBuffer<8, 2048>>> = MsgArrayBuffer::new();
+            let mut buf: Pin<Box<MsgArrayBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>> =
+                MsgArrayBuffer::new();
             loop {
                 buf.clear();
                 self.tproxy_socket
                     .batch_recv(&mut buf)
                     .await
                     .expect("Error on read TProxy socket");
-                if buf.len() > 1 {
+                if buf.len() >= UDP_BATCH_SIZE / 2 {
                     // FIXME: remove it
-                    debug!("Batch recv {} messages", buf.len());
+                    info!("TProxy batch recv {} messages", buf.len());
                 }
                 for Message {
                     src_addr,

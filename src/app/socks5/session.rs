@@ -12,10 +12,13 @@ use std::{
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use bytes::Bytes;
 use futures::{FutureExt, Stream};
-use tokio::{io::ReadBuf, net::UdpSocket, sync::Notify};
-use tracing::{debug, instrument, trace};
+use tokio::{net::UdpSocket, sync::Notify};
+use tracing::{debug, info, instrument};
 
-use crate::app::types::{ClientAddr, RemoteAddr};
+use crate::app::{
+    net::{AsyncUdpSocket, MsgArrayBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
+    types::{ClientAddr, RemoteAddr},
+};
 
 use super::{quic::QuicConnection, traffic::AtomicTraffic, SocksServer};
 
@@ -92,14 +95,13 @@ impl SocksServer {
         };
         let socket = UdpSocket::bind((bind_ip, 0)).await?;
         socket.connect(self.udp_addr).await?;
-
-        Ok(Session::new(self.clone(), socket, client))
+        Ok(Session::new(self.clone(), socket.try_into()?, client))
     }
 }
 
 pub(crate) struct Session {
     pub(crate) server: Arc<SocksServer>,
-    socket: UdpSocket,
+    socket: AsyncUdpSocket,
     client: Option<ClientAddr>,
     pub(super) quic: Option<QuicConnection>,
     pub(super) created_at: Instant,
@@ -127,7 +129,7 @@ impl Display for Session {
 }
 
 impl Session {
-    fn new(server: Arc<SocksServer>, socket: UdpSocket, client: Option<ClientAddr>) -> Self {
+    fn new(server: Arc<SocksServer>, socket: AsyncUdpSocket, client: Option<ClientAddr>) -> Self {
         server.status.usage.open_session();
         Session {
             server,
@@ -163,24 +165,7 @@ impl Session {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(server=self.server.name))]
-    pub(crate) async fn recv(&self, mut buf: &mut [u8]) -> Result<usize> {
-        let mut req_buf = vec![0u8; 2048];
-        loop {
-            req_buf.resize(2048, 0);
-            let n = self.socket.recv(&mut req_buf).await?;
-            req_buf.resize(n, 0);
-            trace!("Received {} bytes: {:?}", n, req_buf);
-            if let Some((pkt, _, _)) = decode_packet(&req_buf) {
-                self.traffic.add_rx(pkt.len());
-                self.server.status.usage.traffic.add_rx(pkt.len());
-                let n = buf.write(pkt)?;
-                return Ok(n);
-            }
-        }
-    }
-
-    pub(super) fn incoming(self: &Arc<Self>) -> SessionIncoming {
+    pub(crate) fn incoming(self: &Arc<Self>) -> SessionIncoming {
         SessionIncoming::new(self)
     }
 }
@@ -202,6 +187,8 @@ pub(crate) struct SessionIncoming {
     session: Weak<Session>,
     override_remote: Option<RemoteAddr>,
     drop_notify: Pin<Box<dyn Future<Output = ()> + Sync + Send>>,
+    buf: Pin<Box<MsgArrayBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>>,
+    buf_pos: usize,
 }
 
 impl SessionIncoming {
@@ -219,18 +206,33 @@ impl SessionIncoming {
             session: Arc::downgrade(session),
             override_remote,
             drop_notify: Box::pin(wait_notify(session.drop_notify.clone())),
+            buf: MsgArrayBuffer::new(),
+            buf_pos: 0,
         }
+    }
+
+    fn decode_socks5_udp(&self, buf: &[u8], session: &Arc<Session>) -> Option<(RemoteAddr, Bytes)> {
+        let (pkt, addr, port) = decode_packet(buf)?;
+        session.traffic.add_rx(pkt.len());
+        session.server.status.usage.traffic.add_rx(pkt.len());
+        let remote: RemoteAddr = if let Some(remote) = self.override_remote {
+            remote
+        } else {
+            match addr {
+                SocksDstAddr::Ipv4(ip) => SocketAddr::from((ip, port)).into(),
+                SocksDstAddr::Ipv6(ip) => SocketAddr::from((ip, port)).into(),
+                SocksDstAddr::Name(name) => {
+                    debug!("Unexpected domain name `{}`, remote DNS not in use", name);
+                    return None;
+                }
+            }
+        };
+        Some((remote, Bytes::copy_from_slice(pkt)))
     }
 }
 
 async fn wait_notify(notify: Arc<Notify>) {
     notify.notified().await
-}
-
-macro_rules! ready_io_err {
-    ($kind:ident, $err:expr) => {
-        Poll::Ready(Some(Err(io::Error::new(ErrorKind::$kind, $err))))
-    };
 }
 
 impl Stream for SessionIncoming {
@@ -248,38 +250,30 @@ impl Stream for SessionIncoming {
             None => return Poll::Ready(None),
         };
 
-        let mut buf_array = [0u8; 2048];
-        let mut buf = ReadBuf::new(&mut buf_array);
         loop {
-            match session.socket.poll_recv(cx, &mut buf) {
-                Poll::Pending => break Poll::Pending,
-                Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
-                Poll::Ready(Ok(())) => {
-                    if let Some((pkt, addr, port)) = decode_packet(buf.filled()) {
-                        session.traffic.add_rx(pkt.len());
-                        session.server.status.usage.traffic.add_rx(pkt.len());
-                        let remote: RemoteAddr = if let Some(remote) = self.override_remote {
-                            remote
-                        } else {
-                            match addr {
-                                SocksDstAddr::Ipv4(ip) => SocketAddr::from((ip, port)).into(),
-                                SocksDstAddr::Ipv6(ip) => SocketAddr::from((ip, port)).into(),
-                                SocksDstAddr::Name(name) => {
-                                    break ready_io_err!(
-                                        InvalidData,
-                                        format!(
-                                            "Unexpected domain name `{}`, remote DNS not in use",
-                                            name
-                                        )
-                                    )
-                                }
-                            }
-                        };
-                        break Poll::Ready(Some(Ok((remote, Bytes::copy_from_slice(pkt)))));
+            // Fill message buffer if empty or used
+            if self.buf_pos >= self.buf.len() {
+                self.buf.clear();
+                match session.socket.poll_batch_recv(cx, &mut self.buf) {
+                    Poll::Pending => break Poll::Pending,
+                    Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
+                    Poll::Ready(Ok(())) => {
+                        self.buf_pos = 0; // Reset buffer position
+                        if self.buf.len() >= 2 {
+                            // FIXME: remove it
+                            info!("Upstream batch recv {} messages", self.buf.len());
+                        }
                     }
                 }
             }
-            buf.clear()
+            // Decode packets
+            while self.buf_pos < self.buf.len() {
+                self.buf_pos += 1;
+                let msg = self.buf.get(self.buf_pos - 1);
+                if let Some(result) = self.decode_socks5_udp(msg.buf, &session) {
+                    return Poll::Ready(Some(Ok(result)));
+                }
+            }
         }
     }
 }
