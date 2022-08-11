@@ -60,12 +60,14 @@ impl AsyncUdpSocket {
         cx: &mut Context<'_>,
         buf: &mut Pin<Box<MsgArrayBuffer<N, M>>>,
     ) -> Poll<io::Result<()>> {
-        match ready!(self.inner.poll_read_ready(cx)) {
-            Err(err) => Poll::Ready(Err(err)),
-            Ok(mut guard) => match guard.try_io(|inner| recv_mmsg(inner, buf)) {
-                Ok(result) => Poll::Ready(result),
-                Err(_would_block) => Poll::Pending,
-            },
+        loop {
+            match ready!(self.inner.poll_read_ready(cx)) {
+                Err(err) => break Poll::Ready(Err(err)),
+                Ok(mut guard) => match guard.try_io(|inner| recv_mmsg(inner, buf)) {
+                    Ok(result) => break Poll::Ready(result),
+                    Err(_would_block) => continue,
+                },
+            }
         }
     }
 
@@ -146,6 +148,7 @@ unsafe impl<const N: usize, const M: usize> Send for MsgArrayBuffer<N, M> {}
 // Safety: no interior mutability
 unsafe impl<const N: usize, const M: usize> Sync for MsgArrayBuffer<N, M> {}
 
+#[derive(Debug)]
 pub(crate) struct Message<'a> {
     pub(crate) src_addr: Option<SocketAddr>,
     pub(crate) dst_addr: Option<SocketAddr>,

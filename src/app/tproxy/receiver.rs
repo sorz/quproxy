@@ -40,7 +40,11 @@ impl TProxyReceiver {
                     .expect("Error on read TProxy socket");
                 if buf.len() >= UDP_BATCH_SIZE / 2 {
                     // FIXME: remove it
-                    info!("TProxy batch recv {} messages", buf.len());
+                    info!(
+                        "TProxy batch recv {}/{} messages",
+                        buf.len(),
+                        UDP_BATCH_SIZE
+                    );
                 }
                 for Message {
                     src_addr,

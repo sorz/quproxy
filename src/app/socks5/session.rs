@@ -13,7 +13,7 @@ use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use bytes::Bytes;
 use futures::{FutureExt, Stream};
 use tokio::{net::UdpSocket, sync::Notify};
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, trace};
 
 use crate::app::{
     net::{AsyncUdpSocket, MsgArrayBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
@@ -259,9 +259,13 @@ impl Stream for SessionIncoming {
                     Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
                     Poll::Ready(Ok(())) => {
                         self.buf_pos = 0; // Reset buffer position
-                        if self.buf.len() >= 2 {
+                        if self.buf.len() >= UDP_BATCH_SIZE / 2 {
                             // FIXME: remove it
-                            info!("Upstream batch recv {} messages", self.buf.len());
+                            info!(
+                                "Upstream batch recv {}/{} messages",
+                                self.buf.len(),
+                                UDP_BATCH_SIZE
+                            );
                         }
                     }
                 }
@@ -271,6 +275,11 @@ impl Stream for SessionIncoming {
                 self.buf_pos += 1;
                 let msg = self.buf.get(self.buf_pos - 1);
                 if let Some(result) = self.decode_socks5_udp(msg.buf, &session) {
+                    trace!(
+                        "Session incoming ready: {}/{} pkt",
+                        self.buf_pos,
+                        self.buf.len()
+                    );
                     return Poll::Ready(Some(Ok(result)));
                 }
             }
