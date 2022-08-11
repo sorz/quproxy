@@ -16,7 +16,7 @@ use tokio::{net::UdpSocket, sync::Notify};
 use tracing::{debug, info, instrument, trace};
 
 use crate::app::{
-    net::{AsyncUdpSocket, MsgArrayBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
+    net::{AsyncUdpSocket, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
     types::{ClientAddr, RemoteAddr},
 };
 
@@ -187,7 +187,7 @@ pub(crate) struct SessionIncoming {
     session: Weak<Session>,
     override_remote: Option<RemoteAddr>,
     drop_notify: Pin<Box<dyn Future<Output = ()> + Sync + Send>>,
-    buf: Pin<Box<MsgArrayBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>>,
+    buf: Pin<Box<MsgArrayReadBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>>,
     buf_pos: usize,
 }
 
@@ -206,7 +206,7 @@ impl SessionIncoming {
             session: Arc::downgrade(session),
             override_remote,
             drop_notify: Box::pin(wait_notify(session.drop_notify.clone())),
-            buf: MsgArrayBuffer::new(),
+            buf: MsgArrayReadBuffer::new(),
             buf_pos: 0,
         }
     }

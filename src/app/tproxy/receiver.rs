@@ -7,7 +7,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, trace, warn};
 
 use crate::app::{
-    net::{AsyncUdpSocket, Message, MsgArrayBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
+    net::{AsyncUdpSocket, Message, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
     types::{ClientAddr, RemoteAddr, UdpPacket},
     AppContext,
 };
@@ -30,8 +30,8 @@ impl TProxyReceiver {
     pub(crate) fn incoming_packets(self) -> impl Stream<Item = UdpPacket> {
         let (sender, receiver) = mpsc::channel(16);
         tokio::spawn(async move {
-            let mut buf: Pin<Box<MsgArrayBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>> =
-                MsgArrayBuffer::new();
+            let mut buf: Pin<Box<MsgArrayReadBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>> =
+                MsgArrayReadBuffer::new();
             loop {
                 buf.clear();
                 self.tproxy_socket
