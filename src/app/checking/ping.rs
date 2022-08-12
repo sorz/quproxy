@@ -190,7 +190,7 @@ impl Pingable for Arc<SocksServer> {
         };
         trace!("wait_send {:#.1?}, wait_last {:#.1?}", wait_send, wait_last);
 
-        let session: Arc<_> = self.bind(None).await?.into();
+        let session: Arc<_> = self.bind(dns_addr.into()).await?.into();
 
         // Send queries
         let tid_send = tids.clone();
@@ -204,9 +204,7 @@ impl Pingable for Arc<SocksServer> {
                 query[0] = (tid >> 8) as u8;
                 query[1] = (tid & 0xff) as u8;
                 trace!("Send DNS query: {:?}", query);
-                session_clone
-                    .send_to_remote(dns_addr.into(), &query)
-                    .await?;
+                session_clone.send_to_remote(&query).await?;
             }
             Ok(())
         };
@@ -217,22 +215,24 @@ impl Pingable for Arc<SocksServer> {
             let t0 = Instant::now();
             timeout(wait_send * (count as u32 - 1) + wait_last, async {
                 loop {
-                    let buf = match incoming.next().await.unwrap() {
-                        Ok((_, buf)) => buf,
+                    let pkts = match incoming.next().await.unwrap() {
+                        Ok(pkts) => pkts,
                         Err(err) => break Err(err),
                     };
-                    if buf.len() < 12 {
-                        debug!("DNS reply too short ({} bytes)", buf.len());
-                        continue;
-                    }
-                    trace!("Recevied DNS reply: {:?}", &buf);
-                    let tid = (buf[0] as u16) << 8 | (buf[1] as u16);
-                    if let Some(n) = tids.iter().position(|t| t == &tid) {
-                        let delay = t0.elapsed() - wait_send * (n as u32);
-                        break Ok((n, delay));
-                    } else {
-                        debug!("Unknown transcation ID ({})", tid);
-                        continue;
+                    for pkt in pkts.iter() {
+                        if pkt.len() < 12 {
+                            debug!("DNS reply too short ({} bytes)", pkt.len());
+                            continue;
+                        }
+                        trace!("Recevied DNS reply: {:?}", &pkt);
+                        let tid = (pkt[0] as u16) << 8 | (pkt[1] as u16);
+                        if let Some(n) = tids.iter().position(|t| t == &tid) {
+                            let delay = t0.elapsed() - wait_send * (n as u32);
+                            return Ok((n, delay));
+                        } else {
+                            debug!("Unknown transcation ID ({})", tid);
+                            continue;
+                        }
                     }
                 }
             })

@@ -1,8 +1,8 @@
 use std::{
     fmt::{Display, Formatter},
     future::Future,
-    io::{self, ErrorKind, Read, Result, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    io::{self, Read, Result, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll},
@@ -10,83 +10,84 @@ use std::{
 };
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use futures::{FutureExt, Stream};
 use tokio::{net::UdpSocket, sync::Notify};
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, info, instrument};
 
-use crate::app::{
-    net::{AsyncUdpSocket, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
-    types::{ClientAddr, RemoteAddr},
-};
+use crate::app::net::{AsyncUdpSocket, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE};
 
-use super::{quic::QuicConnection, traffic::AtomicTraffic, SocksServer};
+use super::{server::AppProto, traffic::AtomicTraffic, SocksServer};
 
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
 const ATYP_NAME: u8 = 0x03;
 
-enum SocksDstAddr<T> {
-    Ipv4(Ipv4Addr),
-    Ipv6(Ipv6Addr),
-    Name(T),
+#[derive(Debug)]
+pub(crate) enum SocksTarget {
+    V4(SocketAddrV4),
+    V6(SocketAddrV6),
+    Name((String, u16)),
 }
 
-impl<T> From<IpAddr> for SocksDstAddr<T> {
-    fn from(addr: IpAddr) -> Self {
+impl From<SocketAddr> for SocksTarget {
+    fn from(addr: SocketAddr) -> Self {
         match addr {
-            IpAddr::V4(addr) => SocksDstAddr::Ipv4(addr),
-            IpAddr::V6(addr) => SocksDstAddr::Ipv6(addr),
+            SocketAddr::V4(addr) => SocksTarget::V4(addr),
+            SocketAddr::V6(addr) => SocksTarget::V6(addr),
         }
     }
 }
 
-impl<T: AsRef<str>> SocksDstAddr<T> {
+impl From<(String, u16)> for SocksTarget {
+    fn from(value: (String, u16)) -> Self {
+        SocksTarget::Name(value)
+    }
+}
+
+impl Display for SocksTarget {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SocksTarget::V4(addr) => write!(f, "{}", addr),
+            SocksTarget::V6(addr) => write!(f, "{}", addr),
+            SocksTarget::Name((name, port)) => write!(f, "{}:{}", name, port),
+        }
+    }
+}
+
+impl SocksTarget {
     fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         match self {
-            SocksDstAddr::Ipv4(addr) => {
+            SocksTarget::V4(addr) => {
                 writer.write_u8(ATYP_IPV4)?;
-                writer.write_all(&addr.octets())
+                writer.write_all(&addr.ip().octets())?;
+                writer.write_u16::<BE>(addr.port())
             }
-            SocksDstAddr::Ipv6(addr) => {
+            SocksTarget::V6(addr) => {
                 writer.write_u8(ATYP_IPV6)?;
-                writer.write_all(&addr.octets())
+                writer.write_all(&addr.ip().octets())?;
+                writer.write_u16::<BE>(addr.port())
             }
-            SocksDstAddr::Name(name) => {
+            SocksTarget::Name((name, port)) => {
                 writer.write_u8(ATYP_NAME)?;
-                writer.write_u8(name.as_ref().len().try_into().unwrap())?;
-                writer.write_all(name.as_ref().as_bytes())
+                writer.write_u8(name.len().try_into().unwrap())?;
+                writer.write_all(name.as_bytes())?;
+                writer.write_u16::<BE>(*port)
             }
         }
     }
-}
 
-impl SocksDstAddr<String> {
-    fn read_from<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let addr = match reader.read_u8()? {
-            ATYP_IPV4 => SocksDstAddr::Ipv4(Ipv4Addr::from(reader.read_u32::<BE>()?)),
-            ATYP_IPV6 => SocksDstAddr::Ipv6(Ipv6Addr::from(reader.read_u128::<BE>()?)),
-            ATYP_NAME => {
-                let len = reader.read_u8()? as usize;
-                let mut buf = vec![0u8; len];
-                reader.read_exact(&mut buf)?;
-                let name = String::from_utf8(buf)
-                    .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-                SocksDstAddr::Name(name)
-            }
-            _ => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Unsupported address type",
-                ))
-            }
-        };
-        Ok(addr)
+    pub(crate) fn proto(&self) -> AppProto {
+        match self {
+            SocksTarget::V4(_) => AppProto::IPv4,
+            SocksTarget::V6(_) => AppProto::IPv6,
+            SocksTarget::Name(_) => AppProto::Any,
+        }
     }
 }
 
 impl SocksServer {
-    pub(crate) async fn bind(self: &Arc<Self>, client: Option<ClientAddr>) -> Result<Session> {
+    pub(crate) async fn bind(self: &Arc<Self>, target: SocksTarget) -> Result<SocksSession> {
         let bind_ip: IpAddr = match self.udp_addr.ip() {
             IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),
             IpAddr::V6(ip) if ip.is_loopback() => Ipv6Addr::LOCALHOST.into(),
@@ -95,69 +96,45 @@ impl SocksServer {
         };
         let socket = UdpSocket::bind((bind_ip, 0)).await?;
         socket.connect(self.udp_addr).await?;
-        Ok(Session::new(self.clone(), socket.try_into()?, client))
+        Ok(SocksSession::new(self.clone(), socket.try_into()?, target))
     }
 }
 
-pub(crate) struct Session {
+pub(crate) struct SocksSession {
     pub(crate) server: Arc<SocksServer>,
     socket: AsyncUdpSocket,
-    client: Option<ClientAddr>,
-    pub(super) quic: Option<QuicConnection>,
-    pub(super) created_at: Instant,
+    target: SocksTarget,
     pub(super) traffic: AtomicTraffic,
+    created_at: Instant,
     drop_notify: Arc<Notify>,
 }
 
-impl Display for Session {
+impl Display for SocksSession {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self.client {
-            Some(ClientAddr(client)) => {
-                write!(f, "Session ({} => {}", client.ip(), self.server.name)?
-            }
-            None => write!(f, "Session ({}", self.server.name)?,
-        }
-        if let Some(QuicConnection {
-            remote_name: Some(name),
-            ..
-        }) = &self.quic
-        {
-            write!(f, " => {}", name)?;
-        }
-        write!(f, ")")
+        write!(f, "SocksSession ({} => {})", self.server.name, self.target)
     }
 }
 
-impl Session {
-    fn new(server: Arc<SocksServer>, socket: AsyncUdpSocket, client: Option<ClientAddr>) -> Self {
+impl SocksSession {
+    fn new(server: Arc<SocksServer>, socket: AsyncUdpSocket, target: SocksTarget) -> Self {
         server.status.usage.open_session();
-        Session {
+        let this = SocksSession {
             server,
             socket,
-            client,
-            quic: None,
-            drop_notify: Default::default(),
+            target,
             created_at: Instant::now(),
+            drop_notify: Default::default(),
             traffic: Default::default(),
-        }
+        };
+        debug!("Open {}", this);
+        this
     }
 
     #[instrument(skip_all, fields(buf_len=buf.len()))]
-    pub(crate) async fn send_to_remote(&self, target: RemoteAddr, buf: &[u8]) -> Result<()> {
+    pub(crate) async fn send_to_remote(&self, buf: &[u8]) -> Result<()> {
         let mut request = Vec::with_capacity(buf.len() + 22);
         request.write_all(&[0x00, 0x00, 0x00])?;
-        let addr = match &self.quic {
-            Some(QuicConnection {
-                remote_orig,
-                remote_name: Some(remote_name),
-            }) if remote_orig == &target => {
-                // Remote DNS resolve enabled
-                SocksDstAddr::Name(remote_name)
-            }
-            _ => target.0.ip().into(),
-        };
-        addr.write_to(&mut request)?;
-        request.write_all(&target.0.port().to_be_bytes())?;
+        self.target.write_to(&mut request)?;
         request.write_all(buf)?;
         let n = self.socket.send(&request).await?;
         self.traffic.add_tx(n);
@@ -170,8 +147,9 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for SocksSession {
     fn drop(&mut self) {
+        self.drop_notify.notify_waiters();
         self.server.status.usage.close_session();
         debug!(
             "Close {}, {:#.0?}, {}",
@@ -179,55 +157,22 @@ impl Drop for Session {
             self.created_at.elapsed(),
             self.traffic.get(),
         );
-        self.drop_notify.notify_waiters();
     }
 }
 
 pub(crate) struct SessionIncoming {
-    session: Weak<Session>,
-    override_remote: Option<RemoteAddr>,
+    session: Weak<SocksSession>,
     drop_notify: Pin<Box<dyn Future<Output = ()> + Sync + Send>>,
     buf: Pin<Box<MsgArrayReadBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>>,
-    buf_pos: usize,
 }
 
 impl SessionIncoming {
-    fn new(session: &Arc<Session>) -> Self {
-        let override_remote = if let Some(QuicConnection {
-            remote_name: Some(_),
-            remote_orig,
-        }) = session.quic
-        {
-            Some(remote_orig)
-        } else {
-            None
-        };
+    fn new(session: &Arc<SocksSession>) -> Self {
         Self {
             session: Arc::downgrade(session),
-            override_remote,
             drop_notify: Box::pin(wait_notify(session.drop_notify.clone())),
             buf: MsgArrayReadBuffer::new(),
-            buf_pos: 0,
         }
-    }
-
-    fn decode_socks5_udp(&self, buf: &[u8], session: &Arc<Session>) -> Option<(RemoteAddr, Bytes)> {
-        let (pkt, addr, port) = decode_packet(buf)?;
-        session.traffic.add_rx(pkt.len());
-        session.server.status.usage.traffic.add_rx(pkt.len());
-        let remote: RemoteAddr = if let Some(remote) = self.override_remote {
-            remote
-        } else {
-            match addr {
-                SocksDstAddr::Ipv4(ip) => SocketAddr::from((ip, port)).into(),
-                SocksDstAddr::Ipv6(ip) => SocketAddr::from((ip, port)).into(),
-                SocksDstAddr::Name(name) => {
-                    debug!("Unexpected domain name `{}`, remote DNS not in use", name);
-                    return None;
-                }
-            }
-        };
-        Some((remote, Bytes::copy_from_slice(pkt)))
     }
 }
 
@@ -236,7 +181,7 @@ async fn wait_notify(notify: Arc<Notify>) {
 }
 
 impl Stream for SessionIncoming {
-    type Item = io::Result<(RemoteAddr, Bytes)>;
+    type Item = io::Result<Box<[Bytes]>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.drop_notify.poll_unpin(cx).is_ready() {
@@ -250,61 +195,66 @@ impl Stream for SessionIncoming {
             None => return Poll::Ready(None),
         };
 
-        loop {
-            // Fill message buffer if empty or used
-            if self.buf_pos >= self.buf.len() {
-                self.buf.clear();
-                match session.socket.poll_batch_recv(cx, &mut self.buf) {
-                    Poll::Pending => break Poll::Pending,
-                    Poll::Ready(Err(err)) => break Poll::Ready(Some(Err(err))),
-                    Poll::Ready(Ok(())) => {
-                        self.buf_pos = 0; // Reset buffer position
-                        if self.buf.len() >= UDP_BATCH_SIZE / 2 {
-                            // FIXME: remove it
-                            info!(
-                                "Upstream batch recv {}/{} messages",
-                                self.buf.len(),
-                                UDP_BATCH_SIZE
-                            );
-                        }
-                    }
-                }
-            }
-            // Decode packets
-            while self.buf_pos < self.buf.len() {
-                self.buf_pos += 1;
-                let msg = self.buf.get(self.buf_pos - 1);
-                if let Some(result) = self.decode_socks5_udp(msg.buf, &session) {
-                    trace!(
-                        "Session incoming ready: {}/{} pkt",
-                        self.buf_pos,
-                        self.buf.len()
+        // Fill buffer
+        self.buf.clear();
+        match session.socket.poll_batch_recv(cx, &mut self.buf) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err))),
+            Poll::Ready(Ok(())) => {
+                if self.buf.len() >= UDP_BATCH_SIZE / 2 {
+                    // FIXME: remove it
+                    info!(
+                        "Upstream batch recv {}/{} messages",
+                        self.buf.len(),
+                        UDP_BATCH_SIZE
                     );
-                    return Poll::Ready(Some(Ok(result)));
                 }
             }
         }
+
+        // Decode packets
+        let pkts: Box<[_]> = self
+            .buf
+            .iter()
+            .filter_map(|msg| match decode_packet(msg.buf) {
+                Ok(buf) => {
+                    session.traffic.add_rx(buf.len());
+                    session.server.status.usage.traffic.add_rx(buf.len());
+                    Some(Bytes::copy_from_slice(buf))
+                }
+                Err(err) => {
+                    debug!("Failed to parse SOCKSv5 UDP: {}", { err });
+                    None
+                }
+            })
+            .collect();
+        Poll::Ready(Some(Ok(pkts)))
     }
 }
 
-fn decode_packet(mut pkt: &[u8]) -> Option<(&[u8], SocksDstAddr<String>, u16)> {
+fn decode_packet(mut pkt: &[u8]) -> io::Result<&[u8]> {
     if pkt.len() < 10 {
-        debug!("UDP request too short");
-        return None;
+        io_error!(UnexpectedEof, "UDP request too short");
     }
     pkt.read_u16::<BE>().unwrap(); // reversed
     if pkt.read_u8().unwrap() != 0 {
         // fragment number
-        debug!("Dropped UDP fragments");
-        return None;
+        io_error!(InvalidData, "Fragmented UDP, dropped");
     }
-    let remote = match SocksDstAddr::read_from(&mut pkt) {
-        Ok(addr) => addr,
-        Err(err) => {
-            debug!("{}", err);
-            return None;
+    // Skip remote address
+    match pkt.read_u8()? {
+        ATYP_IPV4 => pkt.read_exact(&mut [0; 4])?,
+        ATYP_IPV6 => pkt.read_exact(&mut [0; 16])?,
+        ATYP_NAME => {
+            let n = pkt.read_u8()?.into();
+            if pkt.remaining() < n {
+                io_error!(UnexpectedEof, "Truncated UDP request");
+            }
+            pkt.advance(n);
         }
-    };
-    let port = pkt.read_u16::<BE>().unwrap();
-    Some((pkt, remote, port))
+        _ => io_error!(InvalidData, "Invalid address type, dropped"),
+    }
+    // Skip port number
+    pkt.read_u16::<BE>()?;
+    Ok(pkt)
 }

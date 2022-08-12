@@ -1,6 +1,16 @@
+macro_rules! io_error {
+    ($kind:ident, $msg:expr) => {
+        return Err(io::Error::new(io::ErrorKind::$kind, $msg))
+    };
+    ($msg:expr) => {
+        io_error!(Other, $msg)
+    };
+}
+
 mod checking;
 mod context;
 mod net;
+mod quic;
 mod socks5;
 mod status;
 mod tproxy;

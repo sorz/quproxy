@@ -119,12 +119,6 @@ impl SocksServer {
     }
 }
 
-macro_rules! io_error {
-    ($msg:expr) => {
-        return Err(io::Error::new(io::ErrorKind::Other, $msg))
-    };
-}
-
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_IPV6: u8 = 0x04;
 

@@ -1,6 +1,3 @@
-mod crypto;
-mod tls;
-
 use std::{cmp, io};
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -10,17 +7,9 @@ use ring::{
 };
 use tracing::info;
 
-use crate::app::types::RemoteAddr;
+use super::{crypto::InitialSecret, tls};
 
-use self::crypto::InitialSecret;
-
-pub(super) const MIN_DATAGRAM_SIZE_BYTES: usize = 1200;
-
-#[derive(Debug, Clone)]
-pub(super) struct QuicConnection {
-    pub(super) remote_orig: RemoteAddr,
-    pub(super) remote_name: Option<String>,
-}
+pub(crate) const MIN_INITIAL_PACKET_SIZE_BYTES: usize = 1200;
 
 #[derive(Debug)]
 pub(super) enum ParseError {
@@ -41,19 +30,10 @@ impl From<Unspecified> for ParseError {
     }
 }
 
-impl QuicConnection {
-    pub(super) fn try_from(remote: RemoteAddr, pkt: InitialPacket) -> Result<Self, ParseError> {
-        let crypto_msg = pkt.crypto_message()?;
-        let remote_name = if crypto_msg.is_empty() {
-            None
-        } else {
-            tls::get_server_name_from_client_hello(crypto_msg)
-        };
-        Ok(Self {
-            remote_orig: remote,
-            remote_name,
-        })
-    }
+pub(crate) fn get_server_name(pkt: Bytes) -> Option<String> {
+    let init = InitialPacket::decode(pkt).ok()?;
+    let crypto_msg = init.crypto_message().ok()?;
+    tls::get_server_name_from_client_hello(crypto_msg)
 }
 
 pub(super) struct InitialPacket {
@@ -63,7 +43,7 @@ pub(super) struct InitialPacket {
 impl InitialPacket {
     pub(super) fn decode(pkt: Bytes) -> Result<Self, ParseError> {
         let mut buf = pkt.clone();
-        if pkt.len() < MIN_DATAGRAM_SIZE_BYTES {
+        if pkt.len() < MIN_INITIAL_PACKET_SIZE_BYTES {
             return Err(ParseError::NoEnoughData);
         }
         let flags = buf[0];
