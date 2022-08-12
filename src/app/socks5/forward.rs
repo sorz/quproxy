@@ -9,13 +9,13 @@ use crate::app::{
     checking::Healthy,
     quic::QuicConn,
     quic::MIN_INITIAL_PACKET_SIZE_BYTES,
-    types::{ClientAddr, RemoteAddr, UdpPacket},
+    types::{ClientAddr, RemoteAddr, UdpPacket, UdpPackets},
     AppContext,
 };
 
 use super::{session::SocksSession, SocksTarget};
 
-pub(crate) struct SocksForwardService<I: Sink<UdpPacket>> {
+pub(crate) struct SocksForwardService<I: Sink<UdpPackets>> {
     context: AppContext,
     conns: LruCache<(ClientAddr, RemoteAddr), QuicConn>,
     sender: I,
@@ -23,7 +23,7 @@ pub(crate) struct SocksForwardService<I: Sink<UdpPacket>> {
 
 impl<I> SocksForwardService<I>
 where
-    I: Sink<UdpPacket> + Clone + Send + Sync + 'static,
+    I: Sink<UdpPackets> + Clone + Send + Sync + 'static,
 {
     pub(crate) fn new(context: &AppContext, sender: I) -> Self {
         Self {

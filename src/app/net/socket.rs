@@ -43,6 +43,16 @@ impl AsyncUdpSocket {
         AsyncUdpSocket::bind(sock, addr)
     }
 
+    pub(crate) async fn batch_send(&self, buf: &mut MsgArrayWriteBuffer) -> io::Result<usize> {
+        loop {
+            let mut guard = self.inner.writable().await?;
+            match guard.try_io(|inner| send_mmsg(inner, buf)) {
+                Ok(result) => break result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
     pub(crate) async fn batch_recv<const N: usize, const M: usize>(
         &self,
         buf: &mut Pin<Box<MsgArrayReadBuffer<N, M>>>,
@@ -68,16 +78,6 @@ impl AsyncUdpSocket {
                     Ok(result) => break Poll::Ready(result),
                     Err(_would_block) => continue,
                 },
-            }
-        }
-    }
-
-    pub(crate) async fn send_to(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
-        loop {
-            let mut guard = self.inner.writable().await?;
-            match guard.try_io(|inner| send_to(inner, buf, target)) {
-                Ok(result) => break result,
-                Err(_would_block) => continue,
             }
         }
     }
@@ -110,22 +110,6 @@ fn new_socket(addr: &SocketAddr) -> io::Result<Socket> {
     sock.set_nonblocking(true)?;
     sock.set_reuse_address(true)?;
     Ok(sock)
-}
-
-fn send_to<T: AsRawFd>(fd: &T, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
-    let target: SockAddr = target.into();
-    let ret = unsafe {
-        libc::sendto(
-            fd.as_raw_fd(),
-            buf.as_ptr().cast(),
-            buf.len(),
-            0,
-            target.as_ptr(),
-            target.len(),
-        )
-    };
-    let len = Errno::result(ret)? as usize;
-    Ok(len)
 }
 
 fn send<T: AsRawFd>(fd: &T, buf: &[u8]) -> io::Result<usize> {
@@ -165,10 +149,8 @@ impl MsgArrayWriteBuffer {
     pub(crate) fn push(&mut self, buf: Bytes, dest: Option<SocketAddr>) {
         self.msgs.push(WriteMsg {
             addr: dest.map(|s| s.into()),
-            iovec: libc::iovec {
-                iov_base: ptr::null_mut(),
-                iov_len: 0,
-            },
+            // `iovec` will be initialized on `prepare_hdrs()`
+            iovec: unsafe { mem::zeroed() },
             buf,
         })
     }
@@ -180,7 +162,10 @@ impl MsgArrayWriteBuffer {
             .skip(self.pos)
             .zip(self.msgs.iter_mut().skip(self.pos))
             .for_each(|(hdr, msg)| {
-                msg.iovec.iov_base = msg.buf.as_ptr() as *mut _;
+                msg.iovec = libc::iovec {
+                    iov_base: msg.buf.as_ptr() as *mut _,
+                    iov_len: msg.buf.len(),
+                };
                 hdr.msg_len = msg.buf.len().try_into().unwrap();
                 hdr.msg_hdr = libc::msghdr {
                     msg_name: msg
@@ -199,12 +184,12 @@ impl MsgArrayWriteBuffer {
         &mut self.hdrs
     }
 
-    fn advance(&mut self, len: usize) {
+    pub(crate) fn advance(&mut self, len: usize) {
         self.pos += len;
         assert!(self.pos <= self.msgs.len());
     }
 
-    fn has_remaining(&self) -> bool {
+    pub(crate) fn has_remaining(&self) -> bool {
         self.pos < self.msgs.len()
     }
 }
@@ -307,9 +292,7 @@ where
             0,
         )
     };
-    let msg_sent = Errno::result(ret)? as usize;
-    buf.advance(msg_sent);
-    Ok(msg_sent)
+    Ok(Errno::result(ret)? as usize)
 }
 
 fn recv_mmsg<const N: usize, const M: usize, T>(

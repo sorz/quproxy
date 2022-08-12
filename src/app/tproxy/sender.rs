@@ -1,6 +1,5 @@
 use std::io;
 
-use bytes::Bytes;
 use futures::Sink;
 use lru_time_cache::{Entry, LruCache};
 use tokio::sync::mpsc;
@@ -8,8 +7,8 @@ use tokio_util::sync::PollSender;
 use tracing::{info, instrument, trace, warn};
 
 use crate::app::{
-    net::AsyncUdpSocket,
-    types::{ClientAddr, RemoteAddr, UdpPacket},
+    net::{AsyncUdpSocket, MsgArrayWriteBuffer},
+    types::{RemoteAddr, UdpPackets},
     AppContext,
 };
 
@@ -26,11 +25,15 @@ impl TProxySender {
         }
     }
 
-    pub(crate) fn launch(mut self) -> impl Sink<UdpPacket> + Clone {
-        let (sender, mut receiver) = mpsc::channel(32);
+    pub(crate) fn launch(mut self) -> impl Sink<UdpPackets> + Clone {
+        let (sender, mut receiver) = mpsc::channel::<UdpPackets>(32);
+        let mut buf = MsgArrayWriteBuffer::with_capacity(16);
         tokio::spawn(async move {
-            while let Some((client, remote, pkt)) = receiver.recv().await {
-                if let Err(err) = self.send_packet(remote, client, pkt).await {
+            while let Some((client, remote, pkts)) = receiver.recv().await {
+                buf.clear();
+                pkts.iter()
+                    .for_each(|pkt| buf.push(pkt.clone(), Some(client.0)));
+                if let Err(err) = self.send_packets(remote, &mut buf).await {
                     info!("Error on sending packet via tproxy: {}", err);
                 }
             }
@@ -40,12 +43,11 @@ impl TProxySender {
         PollSender::new(sender)
     }
 
-    #[instrument(skip_all, fields(src=?src, dst=?dst, pkt_bytes=pkt.len()))]
-    async fn send_packet(
+    #[instrument(skip_all, fields(src=?src))]
+    async fn send_packets(
         &mut self,
         src: RemoteAddr,
-        dst: ClientAddr,
-        pkt: Bytes,
+        buf: &mut MsgArrayWriteBuffer,
     ) -> io::Result<()> {
         let socket = match self.sockets.entry(src) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -54,7 +56,11 @@ impl TProxySender {
                 entry.insert(AsyncUdpSocket::bind_nonlocal(&src.0)?)
             }
         };
-        socket.send_to(&pkt, dst.0).await?;
+        while buf.has_remaining() {
+            let n = socket.batch_send(buf).await?;
+            trace!("Sent {} messages", n);
+            buf.advance(n);
+        }
         Ok(())
     }
 }

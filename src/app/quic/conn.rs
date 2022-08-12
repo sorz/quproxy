@@ -6,7 +6,7 @@ use tracing::{info, trace, warn};
 
 use crate::app::{
     socks5::SocksSession,
-    types::{ClientAddr, RemoteAddr, UdpPacket},
+    types::{ClientAddr, RemoteAddr, UdpPackets},
 };
 
 use super::packet;
@@ -44,7 +44,7 @@ impl QuicConn {
 
     pub(crate) fn set_proxy<I>(&mut self, proxy: SocksSession, sender: I)
     where
-        I: Sink<UdpPacket> + Send + Sync + 'static,
+        I: Sink<UdpPackets> + Send + Sync + 'static,
     {
         let proxy = Arc::new(proxy);
         let mut incoming = Box::pin(proxy.incoming());
@@ -59,13 +59,10 @@ impl QuicConn {
                 match result {
                     Err(err) => info!("Proxy read error: {}", err),
                     Ok(pkts) => {
-                        for pkt in pkts.iter() {
-                            // TODO: batch sending
-                            trace!("{:?} => {:?}: {} bytes", remote, client, pkt.len());
-                            if sender.feed((client, remote, pkt.clone())).await.is_err() {
-                                warn!("TProxySender has been closed");
-                                return;
-                            }
+                        trace!("{:?} => {:?}: {} packets", remote, client, pkts.len());
+                        if sender.feed((client, remote, pkts)).await.is_err() {
+                            warn!("TProxySender has been closed");
+                            return;
                         }
                     }
                 }
