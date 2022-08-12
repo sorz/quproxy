@@ -1,7 +1,7 @@
 use derivative::Derivative;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::{fmt::Debug, future, sync::Arc, time::Duration};
-use tokio::time::{interval_at, Instant};
+use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tracing::{debug, info, instrument, trace};
 
 use crate::app::{
@@ -31,22 +31,25 @@ impl CheckingService {
     #[instrument(skip_all)]
     pub(crate) async fn launch(self) -> ! {
         debug!("Checking service started");
-        let mut interval_ping = interval_at(Instant::now(), self.context.cli_args.check_interval);
-        let mut interval_meter = interval_at(Instant::now(), INTERVAL_METER);
-        let mut interval_health = interval_at(Instant::now() + INTERVAL_HEALTH, INTERVAL_HEALTH);
         let task_ping = async {
+            let mut interval_ping =
+                interval_at(Instant::now(), self.context.cli_args.check_interval);
             loop {
                 interval_ping.tick().await;
                 self.ping_all().await;
             }
         };
         let task_meter = async {
+            let mut interval_meter = interval_at(Instant::now(), INTERVAL_METER);
             loop {
                 interval_meter.tick().await;
                 self.meter_sampling_all().await;
             }
         };
         let task_health = async {
+            let mut interval_health =
+                interval_at(Instant::now() + INTERVAL_HEALTH, INTERVAL_HEALTH);
+            interval_health.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 interval_health.tick().await;
                 self.health_check_all().await;

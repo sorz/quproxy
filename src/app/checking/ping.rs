@@ -1,4 +1,5 @@
 use std::{
+    cmp,
     collections::{HashSet, VecDeque},
     fmt::Display,
     io,
@@ -184,8 +185,8 @@ impl Pingable for Arc<SocksServer> {
 
         let (wait_send, wait_last) = {
             let pings = self.status.pings.lock();
-            match (pings.quantile_delay(0.5), pings.quantile_delay(0.95)) {
-                (Some(a), Some(b)) => (a, b),
+            match (pings.quantile_delay(0.8), pings.quantile_delay(0.95)) {
+                (Some(a), Some(b)) => (a, cmp::max(b, Duration::from_millis(500))),
                 _ => (Duration::from_millis(200), Duration::from_millis(2000)),
             }
         };
