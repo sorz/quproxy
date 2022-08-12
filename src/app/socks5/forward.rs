@@ -7,9 +7,10 @@ use tracing::{debug, info, trace, warn};
 
 use crate::app::{
     checking::Healthy,
+    net::{MsgArrayWriteBuffer, UDP_BATCH_SIZE},
     quic::QuicConn,
     quic::MIN_INITIAL_PACKET_SIZE_BYTES,
-    types::{ClientAddr, RemoteAddr, UdpPacket, UdpPackets},
+    types::{ClientAddr, RemoteAddr, UdpPackets},
     AppContext,
 };
 
@@ -19,6 +20,7 @@ pub(crate) struct SocksForwardService<I: Sink<UdpPackets>> {
     context: AppContext,
     conns: LruCache<(ClientAddr, RemoteAddr), QuicConn>,
     sender: I,
+    buf: MsgArrayWriteBuffer<2>,
 }
 
 impl<I> SocksForwardService<I>
@@ -30,17 +32,22 @@ where
             context: context.clone(),
             conns: context.new_lru_cache_for_sessions(),
             sender,
+            buf: MsgArrayWriteBuffer::with_capacity(UDP_BATCH_SIZE),
         }
     }
 
     pub(crate) async fn serve<R>(mut self, receiver: R)
     where
-        R: Stream<Item = UdpPacket>,
+        R: Stream<Item = UdpPackets>,
     {
         debug!("SOCKS forward service started");
         let mut receiver = Box::pin(receiver);
-        while let Some((client, remote, pkt)) = receiver.next().await {
-            if let Err(err) = self.forward_client_to_remote(client, remote, pkt).await {
+        while let Some((client, remote, pkts)) = receiver.next().await {
+            if pkts.is_empty() {
+                warn!("Empty list of packets");
+                continue;
+            }
+            if let Err(err) = self.forward_client_to_remote(client, remote, &pkts).await {
                 info!("Error on sending packet to proxy: {}", err);
             }
         }
@@ -51,17 +58,18 @@ where
         &mut self,
         client: ClientAddr,
         remote: RemoteAddr,
-        pkt: Bytes,
+        pkts: &[Bytes],
     ) -> io::Result<()> {
         let key = &(client, remote);
         let conn = if !self.conns.contains_key(key) {
             // Start new QUIC conn
-            let conn =
-                if self.context.cli_args.remote_dns && pkt.len() >= MIN_INITIAL_PACKET_SIZE_BYTES {
-                    QuicConn::new(remote, client, Some(pkt.clone()))
-                } else {
-                    QuicConn::new(remote, client, None)
-                };
+            let conn = if self.context.cli_args.remote_dns
+                && pkts[0].len() >= MIN_INITIAL_PACKET_SIZE_BYTES
+            {
+                QuicConn::new(remote, client, Some(pkts[0].clone()))
+            } else {
+                QuicConn::new(remote, client, None)
+            };
             self.conns.entry(*key).or_insert(conn)
         } else {
             self.conns.get_mut(key).unwrap()
@@ -86,18 +94,18 @@ where
         // Forward packet
         if let Some(proxy) = conn.proxy() {
             trace!(
-                "{:?} => {:?} via {}: {} bytes",
+                "{:?} => {:?} via {}: {} packets",
                 client,
                 remote,
                 proxy.server.name,
-                pkt.len(),
+                pkts.len(),
             );
-            if let Err(err) = proxy.send_to_remote(&pkt).await {
+            if let Err(err) = proxy.send_to_remote(pkts, &mut self.buf).await {
                 proxy.server.set_troubleness(true);
                 // TODO: retry with new upstream?
                 info!(
-                    "failed to forward {} bytes packet to remote {:?} via {}: {}",
-                    pkt.len(),
+                    "failed to forward {} packets to remote {:?} via {}: {}",
+                    pkts.len(),
                     remote,
                     proxy.server.name,
                     err

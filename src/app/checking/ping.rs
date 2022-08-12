@@ -9,12 +9,13 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
 use hex_literal::hex;
 use tokio::time::{interval_at, timeout};
 use tracing::{debug, instrument, trace};
 
-use crate::app::{socks5::SocksServer, InnerProto};
+use crate::app::{net::MsgArrayWriteBuffer, socks5::SocksServer, InnerProto};
 
 const DELAY_POWER: f32 = 0.75;
 const DELAY_MAX_HISTORY: usize = 100;
@@ -197,14 +198,17 @@ impl Pingable for Arc<SocksServer> {
         let session_clone = session.clone();
         let mut send_inverval = interval_at(Instant::now().into(), wait_send);
         let task_send = async move {
+            let mut buf = MsgArrayWriteBuffer::with_capacity(1);
             for tid in tid_send {
                 send_inverval.tick().await;
                 // Construct DNS query for A record of "." (root)
-                let mut query = hex!("0000 0120 0001 0000 0000 0000 00 0001 0001");
-                query[0] = (tid >> 8) as u8;
-                query[1] = (tid & 0xff) as u8;
+                let mut query = BytesMut::with_capacity(17);
+                query.put_u16(tid);
+                query.put_slice(&hex!("0120 0001 0000 0000 0000 00 0001 0001"));
                 trace!("Send DNS query: {:?}", query);
-                session_clone.send_to_remote(&query).await?;
+                session_clone
+                    .send_to_remote(&[query.freeze()], &mut buf)
+                    .await?;
             }
             Ok(())
         };

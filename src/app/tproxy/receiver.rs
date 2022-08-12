@@ -1,14 +1,14 @@
-use std::{io, pin::Pin};
+use std::{collections::HashMap, io, pin::Pin};
 
 use bytes::Bytes;
 use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info, trace, warn};
+use tracing::{info, trace};
 
 use crate::app::{
-    net::{AsyncUdpSocket, Message, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
-    types::{ClientAddr, RemoteAddr, UdpPacket},
+    net::{AsyncUdpSocket, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
+    types::UdpPackets,
     AppContext,
 };
 
@@ -27,8 +27,8 @@ impl TProxyReceiver {
         })
     }
 
-    pub(crate) fn incoming_packets(self) -> impl Stream<Item = UdpPacket> {
-        let (sender, receiver) = mpsc::channel(16);
+    pub(crate) fn incoming_packets(self) -> impl Stream<Item = UdpPackets> {
+        let (sender, receiver) = mpsc::channel::<UdpPackets>(16);
         tokio::spawn(async move {
             let mut buf: Pin<Box<MsgArrayReadBuffer<UDP_BATCH_SIZE, UDP_MAX_SIZE>>> =
                 MsgArrayReadBuffer::new();
@@ -46,28 +46,21 @@ impl TProxyReceiver {
                         UDP_BATCH_SIZE
                     );
                 }
-                for Message {
-                    src_addr,
-                    dst_addr,
-                    buf,
-                } in buf.iter()
-                {
-                    if let (Some(src), Some(dst)) = (src_addr, dst_addr) {
-                        let client: ClientAddr = src.into();
-                        let remote: RemoteAddr = dst.into();
-                        trace!(
-                            "Received from TProxy: {:?} => {:?}, {} bytes",
-                            client,
-                            remote,
-                            buf.len(),
-                        );
-                        sender
-                            .send((client, remote, Bytes::copy_from_slice(buf)))
-                            .await
-                            .expect("Error on send incoming packet");
-                    } else {
-                        warn!("Missing src/dst address from TProxy socket");
-                    }
+                let mut addrs_pkts: HashMap<_, Vec<_>> = HashMap::new();
+                buf.iter()
+                    .inspect(|msg| trace!("Receive from TProxy: {}", msg))
+                    .filter_map(|msg| Some(((msg.src_addr?, msg.dst_addr?), msg.buf)))
+                    .for_each(|(addrs, pkt)| {
+                        addrs_pkts
+                            .entry(addrs)
+                            .or_default()
+                            .push(Bytes::copy_from_slice(pkt))
+                    });
+                for ((src, dst), pkts) in addrs_pkts.into_iter() {
+                    sender
+                        .send((src.into(), dst.into(), pkts.into_boxed_slice()))
+                        .await
+                        .expect("Error on send incoming packet");
                 }
             }
         });

@@ -32,7 +32,7 @@ impl TProxySender {
             while let Some((client, remote, pkts)) = receiver.recv().await {
                 buf.clear();
                 pkts.iter()
-                    .for_each(|pkt| buf.push(pkt.clone(), Some(client.0)));
+                    .for_each(|pkt| buf.push([pkt.clone()], Some(client.0)));
                 if let Err(err) = self.send_packets(remote, &mut buf).await {
                     info!("Error on sending packet via tproxy: {}", err);
                 }
@@ -47,7 +47,7 @@ impl TProxySender {
     async fn send_packets(
         &mut self,
         src: RemoteAddr,
-        buf: &mut MsgArrayWriteBuffer,
+        buf: &mut MsgArrayWriteBuffer<1>,
     ) -> io::Result<()> {
         let socket = match self.sockets.entry(src) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -57,9 +57,9 @@ impl TProxySender {
             }
         };
         while buf.has_remaining() {
-            let n = socket.batch_send(buf).await?;
-            trace!("Sent {} messages", n);
+            let (n, len) = socket.batch_send(buf).await?;
             buf.advance(n);
+            trace!("Sent {} messages, {} bytes", n, len);
         }
         Ok(())
     }

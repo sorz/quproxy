@@ -19,7 +19,6 @@ impl From<SocketAddr> for RemoteAddr {
     }
 }
 
-pub(crate) type UdpPacket = (ClientAddr, RemoteAddr, Bytes);
 pub(crate) type UdpPackets = (ClientAddr, RemoteAddr, Box<[Bytes]>);
 
 fn canonicalize_socket_addr(addr: SocketAddr) -> SocketAddr {

@@ -1,7 +1,7 @@
 use std::{
     fmt::{Display, Formatter},
     future::Future,
-    io::{self, Read, Result, Write},
+    io::{self, Read, Result},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
     sync::{Arc, Weak},
@@ -9,13 +9,15 @@ use std::{
     time::Instant,
 };
 
-use byteorder::{ReadBytesExt, WriteBytesExt, BE};
-use bytes::{Buf, Bytes};
+use byteorder::{ReadBytesExt, BE};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{FutureExt, Stream};
 use tokio::{net::UdpSocket, sync::Notify};
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, trace};
 
-use crate::app::net::{AsyncUdpSocket, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE};
+use crate::app::net::{
+    AsyncUdpSocket, MsgArrayReadBuffer, MsgArrayWriteBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE,
+};
 
 use super::{server::AppProto, traffic::AtomicTraffic, SocksServer};
 
@@ -56,23 +58,23 @@ impl Display for SocksTarget {
 }
 
 impl SocksTarget {
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn write_to<W: BufMut>(&self, writer: &mut W) {
         match self {
             SocksTarget::V4(addr) => {
-                writer.write_u8(ATYP_IPV4)?;
-                writer.write_all(&addr.ip().octets())?;
-                writer.write_u16::<BE>(addr.port())
+                writer.put_u8(ATYP_IPV4);
+                writer.put_slice(&addr.ip().octets());
+                writer.put_u16(addr.port());
             }
             SocksTarget::V6(addr) => {
-                writer.write_u8(ATYP_IPV6)?;
-                writer.write_all(&addr.ip().octets())?;
-                writer.write_u16::<BE>(addr.port())
+                writer.put_u8(ATYP_IPV6);
+                writer.put_slice(&addr.ip().octets());
+                writer.put_u16(addr.port());
             }
             SocksTarget::Name((name, port)) => {
-                writer.write_u8(ATYP_NAME)?;
-                writer.write_u8(name.len().try_into().unwrap())?;
-                writer.write_all(name.as_bytes())?;
-                writer.write_u16::<BE>(*port)
+                writer.put_u8(ATYP_NAME);
+                writer.put_u8(name.len().try_into().unwrap());
+                writer.put_slice(name.as_bytes());
+                writer.put_u16(*port);
             }
         }
     }
@@ -107,6 +109,7 @@ pub(crate) struct SocksSession {
     pub(super) traffic: AtomicTraffic,
     created_at: Instant,
     drop_notify: Arc<Notify>,
+    header: Bytes,
 }
 
 impl Display for SocksSession {
@@ -118,10 +121,14 @@ impl Display for SocksSession {
 impl SocksSession {
     fn new(server: Arc<SocksServer>, socket: AsyncUdpSocket, target: SocksTarget) -> Self {
         server.status.usage.open_session();
+        let mut header = BytesMut::with_capacity(22);
+        header.put_slice(&[0x00, 0x00, 0x00]);
+        target.write_to(&mut header);
         let this = SocksSession {
             server,
             socket,
             target,
+            header: header.freeze(),
             created_at: Instant::now(),
             drop_notify: Default::default(),
             traffic: Default::default(),
@@ -130,15 +137,21 @@ impl SocksSession {
         this
     }
 
-    #[instrument(skip_all, fields(buf_len=buf.len()))]
-    pub(crate) async fn send_to_remote(&self, buf: &[u8]) -> Result<()> {
-        let mut request = Vec::with_capacity(buf.len() + 22);
-        request.write_all(&[0x00, 0x00, 0x00])?;
-        self.target.write_to(&mut request)?;
-        request.write_all(buf)?;
-        let n = self.socket.send(&request).await?;
-        self.traffic.add_tx(n);
-        self.server.status.usage.traffic.add_tx(n);
+    #[instrument(skip_all, fields(pkts=pkts.len()))]
+    pub(crate) async fn send_to_remote(
+        &self,
+        pkts: &[Bytes],
+        buf: &mut MsgArrayWriteBuffer<2>,
+    ) -> Result<()> {
+        pkts.iter()
+            .for_each(|pkt| buf.push([self.header.clone(), pkt.clone()], None));
+        while buf.has_remaining() {
+            let (n, len) = self.socket.batch_send(buf).await?;
+            buf.advance(n);
+            trace!("Sent {}/{} packets, {} bytes", n, pkts.len(), len);
+            self.traffic.add_tx(len);
+            self.server.status.usage.traffic.add_tx(len);
+        }
         Ok(())
     }
 
