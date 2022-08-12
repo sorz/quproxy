@@ -16,6 +16,7 @@ use libc::{setsockopt, IPPROTO_IP, IPPROTO_IPV6, IPV6_RECVORIGDSTADDR, IP_RECVOR
 use nix::errno::Errno;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::{io::unix::AsyncFd, net::UdpSocket};
+use tracing::warn;
 
 pub(crate) struct AsyncUdpSocket {
     inner: AsyncFd<Socket>,
@@ -191,11 +192,13 @@ unsafe impl<const N: usize> Send for MsgArrayWriteBuffer<N> {}
 // Safety: no interior mutability
 unsafe impl<const N: usize> Sync for MsgArrayWriteBuffer<N> {}
 
+const MSG_CTRL_BUF_SIZE: usize = 128;
+
 pub(crate) struct MsgArrayReadBuffer<const N: usize, const M: usize> {
     msg_cnt: usize,
     msgs: [libc::mmsghdr; N], // contains ptr to `addrs`, `ctrls`, and `iovecs`
     addrs: [libc::sockaddr_storage; N],
-    ctrls: [[u8; 128]; N],
+    ctrls: [[u8; MSG_CTRL_BUF_SIZE]; N],
     iovecs: [libc::iovec; N], // contains ptr to `bufs`
     bufs: [[u8; M]; N],
     _pin: PhantomPinned,
@@ -259,7 +262,12 @@ impl<const N: usize, const M: usize> MsgArrayReadBuffer<N, M> {
     pub(crate) fn clear(self: &mut Pin<Box<Self>>) {
         let mut_pin = Pin::as_mut(self);
         unsafe {
-            mut_pin.get_unchecked_mut().msg_cnt = 0;
+            let mut_ref = mut_pin.get_unchecked_mut();
+            mut_ref.msg_cnt = 0;
+            mut_ref
+                .msgs
+                .iter_mut()
+                .for_each(|msghdr| msghdr.msg_hdr.msg_controllen = MSG_CTRL_BUF_SIZE);
         }
     }
 
@@ -271,9 +279,18 @@ impl<const N: usize, const M: usize> MsgArrayReadBuffer<N, M> {
         if idx >= self.msg_cnt {
             panic!("out of index");
         }
-        let src_addr =
-            unsafe { SockAddr::new(self.addrs[idx], self.msgs[idx].msg_hdr.msg_namelen) };
-        let dst_addr = parse_dest_addr_from_cmsg(&self.msgs[idx].msg_hdr).ok();
+        let msghdr = self.msgs[idx].msg_hdr;
+        let src_addr = unsafe { SockAddr::new(self.addrs[idx], msghdr.msg_namelen) };
+        let dst_addr = parse_dest_addr_from_cmsg(&msghdr).ok();
+        if msghdr.msg_flags & libc::MSG_TRUNC != 0 {
+            warn!("MSG_TRUNC: datagram has been truncted");
+        }
+        if msghdr.msg_flags & libc::MSG_CTRUNC != 0 {
+            warn!(
+                "MSG_CTRUNC: control data has been truncted, len = {}",
+                msghdr.msg_controllen
+            );
+        }
         Message {
             src_addr: src_addr.as_socket(),
             dst_addr: dst_addr.and_then(|d| d.as_socket()),

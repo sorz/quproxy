@@ -2,7 +2,7 @@ use std::{fmt, sync::Arc};
 
 use bytes::Bytes;
 use futures::{Sink, SinkExt, StreamExt};
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::app::{
     socks5::SocksSession,
@@ -25,10 +25,9 @@ impl fmt::Display for QuicConn {
             write!(f, "{} => ", proxy.server.name)?;
         }
         match &self.remote_name {
-            Some(name) => write!(f, "{})", name)?,
-            None => write!(f, "{})", self.remote.0)?,
+            Some(name) => write!(f, "{}/{})", name, self.remote.0),
+            None => write!(f, "{})", self.remote.0),
         }
-        write!(f, ")")
     }
 }
 
@@ -77,5 +76,11 @@ impl QuicConn {
 
     pub(crate) fn proxy(&self) -> Option<&SocksSession> {
         self.proxy.as_ref().map(|p| p.as_ref())
+    }
+}
+
+impl Drop for QuicConn {
+    fn drop(&mut self) {
+        debug!("Close {}", self);
     }
 }

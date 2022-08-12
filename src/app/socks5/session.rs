@@ -124,7 +124,7 @@ impl SocksSession {
         let mut header = BytesMut::with_capacity(22);
         header.put_slice(&[0x00, 0x00, 0x00]);
         target.write_to(&mut header);
-        let this = SocksSession {
+        SocksSession {
             server,
             socket,
             target,
@@ -132,9 +132,7 @@ impl SocksSession {
             created_at: Instant::now(),
             drop_notify: Default::default(),
             traffic: Default::default(),
-        };
-        debug!("Open {}", this);
-        this
+        }
     }
 
     #[instrument(skip_all, fields(pkts=pkts.len()))]
@@ -164,7 +162,7 @@ impl Drop for SocksSession {
     fn drop(&mut self) {
         self.drop_notify.notify_waiters();
         self.server.status.usage.close_session();
-        debug!(
+        trace!(
             "Close {}, {:#.0?}, {}",
             self,
             self.created_at.elapsed(),

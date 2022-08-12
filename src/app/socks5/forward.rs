@@ -70,6 +70,7 @@ where
             } else {
                 QuicConn::new(remote, client, None)
             };
+            debug!("Open {}", conn);
             self.conns.entry(*key).or_insert(conn)
         } else {
             self.conns.get_mut(key).unwrap()
