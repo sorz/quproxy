@@ -1,7 +1,7 @@
 use std::io::{self, ErrorKind};
 
 use bytes::Bytes;
-use futures::{Sink, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use lru_time_cache::LruCache;
 use tracing::{debug, info, trace, warn};
 
@@ -10,28 +10,26 @@ use crate::app::{
     net::{MsgArrayWriteBuffer, UDP_BATCH_SIZE},
     quic::QuicConn,
     quic::MIN_INITIAL_PACKET_SIZE_BYTES,
+    tproxy::TProxySenderCache,
     types::{ClientAddr, RemoteAddr, UdpPackets},
     AppContext,
 };
 
 use super::{session::SocksSession, SocksTarget};
 
-pub(crate) struct SocksForwardService<I: Sink<UdpPackets>> {
+pub(crate) struct SocksForwardService {
     context: AppContext,
     conns: LruCache<(ClientAddr, RemoteAddr), QuicConn>,
-    sender: I,
+    senders: TProxySenderCache,
     buf: MsgArrayWriteBuffer<2>,
 }
 
-impl<I> SocksForwardService<I>
-where
-    I: Sink<UdpPackets> + Clone + Send + Sync + 'static,
-{
-    pub(crate) fn new(context: &AppContext, sender: I) -> Self {
+impl SocksForwardService {
+    pub(crate) fn new(context: &AppContext) -> Self {
         Self {
             context: context.clone(),
             conns: context.new_lru_cache_for_sessions(),
-            sender,
+            senders: TProxySenderCache::new(),
             buf: MsgArrayWriteBuffer::with_capacity(UDP_BATCH_SIZE),
         }
     }
@@ -90,7 +88,7 @@ where
                 conn.remote.0.into()
             };
             let proxy = select_proxy(&self.context, target).await?;
-            conn.set_proxy(proxy, self.sender.clone());
+            conn.set_proxy(proxy, self.senders.get_or_create(remote)?);
         }
         // Forward packet
         if let Some(proxy) = conn.proxy() {

@@ -1,12 +1,14 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, io, sync::Arc};
 
 use bytes::Bytes;
-use futures::{Sink, SinkExt, StreamExt};
-use tracing::{debug, info, trace, warn};
+use futures::StreamExt;
+use tracing::{info, trace};
 
 use crate::app::{
+    net::{MsgArrayWriteBuffer, UDP_BATCH_SIZE},
     socks5::SocksSession,
-    types::{ClientAddr, RemoteAddr, UdpPackets},
+    tproxy::TProxySender,
+    types::{ClientAddr, RemoteAddr},
 };
 
 use super::packet;
@@ -41,29 +43,20 @@ impl QuicConn {
         }
     }
 
-    pub(crate) fn set_proxy<I>(&mut self, proxy: SocksSession, sender: I)
-    where
-        I: Sink<UdpPackets> + Send + Sync + 'static,
-    {
+    pub(crate) fn set_proxy(&mut self, proxy: SocksSession, sender: Arc<TProxySender>) {
         let proxy = Arc::new(proxy);
         let mut incoming = Box::pin(proxy.incoming());
-        let mut sender = Box::pin(sender);
         self.proxy = Some(proxy);
         let client = self.client;
         let remote = self.remote;
 
         tokio::spawn(async move {
             trace!("Start forwarding {:?} => {:?}", remote, client);
-            while let Some(result) = incoming.next().await {
-                match result {
-                    Err(err) => info!("Proxy read error: {}", err),
-                    Ok(pkts) => {
-                        trace!("{:?} => {:?}: {} packets", remote, client, pkts.len());
-                        if sender.feed((client, remote, pkts)).await.is_err() {
-                            warn!("TProxySender has been closed");
-                            return;
-                        }
-                    }
+            let mut buf = MsgArrayWriteBuffer::<1>::with_capacity(UDP_BATCH_SIZE / 2);
+            while let Some(pkts) = incoming.next().await {
+                match forward_packets(pkts, client, &sender, &mut buf).await {
+                    Err(err) => info!("Forwarding to client error: {}", err),
+                    Ok((n, len)) => trace!("{:?} => {:?}: {} pkts {}B", remote, client, n, len),
                 }
             }
             trace!("Stop forwarding");
@@ -81,6 +74,27 @@ impl QuicConn {
 
 impl Drop for QuicConn {
     fn drop(&mut self) {
-        debug!("Close {}", self);
+        trace!("Close {}", self);
     }
+}
+
+async fn forward_packets(
+    pkts: io::Result<Box<[Bytes]>>,
+    client: ClientAddr,
+    sender: &TProxySender,
+    buf: &mut MsgArrayWriteBuffer<1>,
+) -> io::Result<(usize, usize)> {
+    buf.clear();
+    pkts?
+        .iter()
+        .for_each(|pkt| buf.push([pkt.clone()], Some(client.0)));
+    let mut total_n = 0;
+    let mut total_len = 0;
+    while buf.has_remaining() {
+        let (n, len) = sender.as_ref().batch_send(buf).await?;
+        buf.advance(n);
+        total_n += n;
+        total_len += len;
+    }
+    Ok((total_n, total_len))
 }

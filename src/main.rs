@@ -20,11 +20,9 @@ async fn main() {
 
     let tproxy_receiver =
         app::TProxyReceiver::new(&context).expect("Failed to launch TProxy receiver");
-    let tproxy_sender = app::TProxySender::new(&context);
     let receiver = tproxy_receiver.incoming_packets();
-    let sender = tproxy_sender.launch();
 
-    app::SocksForwardService::new(&context, sender)
+    app::SocksForwardService::new(&context)
         .serve(receiver)
         .await;
 }
