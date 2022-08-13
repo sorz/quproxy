@@ -38,6 +38,7 @@ impl AppContext {
             .collect();
 
         // TODO: check duplicated socket address & name
+        // TODO: retain order
         if let Some(path) = &args.list {
             let cfg = ConfigFile::from_path(path).expect("Error on read upstream list file");
             for (

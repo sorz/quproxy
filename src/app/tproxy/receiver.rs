@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info, trace};
+use tracing::{trace, debug};
 
 use crate::app::{
     net::{AsyncUdpSocket, MsgArrayReadBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE},
@@ -38,13 +38,8 @@ impl TProxyReceiver {
                     .batch_recv(&mut buf)
                     .await
                     .expect("Error on read TProxy socket");
-                if buf.len() >= UDP_BATCH_SIZE / 2 {
-                    // FIXME: remove it
-                    info!(
-                        "TProxy batch recv {}/{} messages",
-                        buf.len(),
-                        UDP_BATCH_SIZE
-                    );
+                if buf.len() == UDP_BATCH_SIZE {
+                    debug!("TProxy batch recv full ({} msgs)", UDP_BATCH_SIZE);
                 }
                 let mut addrs_pkts: HashMap<_, Vec<_>> = HashMap::new();
                 buf.iter()

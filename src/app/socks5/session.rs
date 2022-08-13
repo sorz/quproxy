@@ -13,7 +13,7 @@ use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{FutureExt, Stream};
 use tokio::sync::Notify;
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, instrument, trace};
 
 use crate::app::net::{
     AsyncUdpSocket, MsgArrayReadBuffer, MsgArrayWriteBuffer, UDP_BATCH_SIZE, UDP_MAX_SIZE,
@@ -205,13 +205,8 @@ impl Stream for SessionIncoming {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err))),
             Poll::Ready(Ok(())) => {
-                if self.buf.len() >= UDP_BATCH_SIZE / 2 {
-                    // FIXME: remove it
-                    info!(
-                        "Upstream batch recv {}/{} messages",
-                        self.buf.len(),
-                        UDP_BATCH_SIZE
-                    );
+                if self.buf.len() == UDP_BATCH_SIZE {
+                    debug!("Upstream batch recv full ({} msgs)", UDP_BATCH_SIZE);
                 }
             }
         }
