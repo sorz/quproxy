@@ -2,7 +2,7 @@ use std::{
     fmt::{Display, Formatter},
     future::Future,
     io::{self, Read, Result},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll},
@@ -12,7 +12,7 @@ use std::{
 use byteorder::{ReadBytesExt, BE};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{FutureExt, Stream};
-use tokio::{net::UdpSocket, sync::Notify};
+use tokio::sync::Notify;
 use tracing::{debug, info, instrument, trace};
 
 use crate::app::net::{
@@ -90,15 +90,8 @@ impl SocksTarget {
 
 impl SocksServer {
     pub(crate) async fn bind(self: &Arc<Self>, target: SocksTarget) -> Result<SocksSession> {
-        let bind_ip: IpAddr = match self.udp_addr.ip() {
-            IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),
-            IpAddr::V6(ip) if ip.is_loopback() => Ipv6Addr::LOCALHOST.into(),
-            IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
-            IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
-        };
-        let socket = UdpSocket::bind((bind_ip, 0)).await?;
-        socket.connect(self.udp_addr).await?;
-        Ok(SocksSession::new(self.clone(), socket.try_into()?, target))
+        let socket = AsyncUdpSocket::connect(&self.udp_addr)?;
+        Ok(SocksSession::new(self.clone(), socket, target))
     }
 }
 

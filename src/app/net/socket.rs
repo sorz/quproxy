@@ -30,6 +30,14 @@ impl AsyncUdpSocket {
         })
     }
 
+    pub(crate) fn connect(addr: &SocketAddr) -> io::Result<Self> {
+        let sock = new_socket(addr)?;
+        sock.connect(&(*addr).into())?;
+        Ok(Self {
+            inner: AsyncFd::new(sock)?,
+        })
+    }
+
     pub(crate) fn bind_tproxy(addr: &SocketAddr) -> io::Result<Self> {
         let sock = new_socket(addr)?;
         // Set IP_TRANSPARENT for TPROXY, CAP_NET_ADMIN required.
