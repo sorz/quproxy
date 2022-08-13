@@ -14,7 +14,7 @@ use bytes::{BufMut, BytesMut};
 use futures::StreamExt;
 use hex_literal::hex;
 use tokio::time::{interval_at, timeout};
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use crate::app::{net::MsgArrayWriteBuffer, socks5::SocksServer, InnerProto};
 
@@ -166,6 +166,23 @@ pub(super) trait Pingable {
     async fn probe_inner_proto(&self, dns4: SocketAddrV4, dns6: SocketAddrV6) -> InnerProto;
 }
 
+const DNS_QUERY: &[u8] = &hex!(
+    // Omit 2-byte transcation ID
+    // Flags: do recursive query, AD
+    "0120"
+    // # of question/answer/authority/addition
+    "0001 0000 0000 0001"
+    // Name: google.com
+    "06 676f6f676c6503636f6d 00"
+    // TXT IN
+    "0010 0001"
+    // EDNS0: 1200B UDP payload
+    "00 0029 04b0 00000000"
+    // Omit 2-byte RDATA length
+);
+
+const DNS_QUERY_SIZE: usize = 500;
+
 #[async_trait]
 impl Pingable for Arc<SocksServer> {
     #[instrument(skip_all, fields(server=self.name, dns=?dns_addr))]
@@ -202,10 +219,17 @@ impl Pingable for Arc<SocksServer> {
             let mut buf = MsgArrayWriteBuffer::with_capacity(1);
             for tid in tid_send {
                 send_inverval.tick().await;
-                // Construct DNS query for A record of "." (root)
-                let mut query = BytesMut::with_capacity(17);
+                // Construct DNS query
+                let mut query = BytesMut::with_capacity(DNS_QUERY_SIZE);
                 query.put_u16(tid);
-                query.put_slice(&hex!("0120 0001 0000 0000 0000 00 0001 0001"));
+                query.put_slice(DNS_QUERY);
+                // Fill query to match DNS_QUERY_SIZE size
+                let rdata_len: u16 = (DNS_QUERY_SIZE - query.len() - 2).try_into().unwrap();
+                query.put_u16(rdata_len); // RDATA length
+                query.put_u16(65001); // Option code: local/experimental use
+                query.put_u16(rdata_len - 4); // Option length
+                query.put_bytes(rand::random(), (rdata_len - 4) as usize);
+                assert!(query.len() == DNS_QUERY_SIZE);
                 trace!("Send DNS query: {:?}", query);
                 session_clone
                     .send_to_remote(&[query.freeze()], &mut buf)
@@ -228,6 +252,9 @@ impl Pingable for Arc<SocksServer> {
                         if pkt.len() < 12 {
                             debug!("DNS reply too short ({} bytes)", pkt.len());
                             continue;
+                        }
+                        if pkt.len() < 400 {
+                            warn!("Suspicious DNS reply: {} < 400 bytes", pkt.len())
                         }
                         trace!("Recevied DNS reply: {:?}", &pkt);
                         let tid = (pkt[0] as u16) << 8 | (pkt[1] as u16);
