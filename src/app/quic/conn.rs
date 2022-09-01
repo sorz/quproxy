@@ -33,6 +33,16 @@ impl fmt::Display for QuicConn {
     }
 }
 
+impl Drop for QuicConn {
+    fn drop(&mut self) {
+        trace!("Close {}", self);
+        if let Some(session) = &self.proxy {
+            assert_eq!(1, Arc::strong_count(session));
+            assert_eq!(1, Arc::weak_count(session));
+        }
+    }
+}
+
 impl QuicConn {
     pub(crate) fn new(remote: RemoteAddr, client: ClientAddr, pkt: Option<Bytes>) -> Self {
         Self {
@@ -61,6 +71,8 @@ impl QuicConn {
             }
             trace!("Stop forwarding");
         });
+        assert_eq!(1, Arc::strong_count(self.proxy.as_ref().unwrap()));
+        assert_eq!(1, Arc::weak_count(self.proxy.as_ref().unwrap()));
     }
 
     pub(crate) fn clear_proxy(&mut self) {
@@ -69,12 +81,6 @@ impl QuicConn {
 
     pub(crate) fn proxy(&self) -> Option<&SocksSession> {
         self.proxy.as_ref().map(|p| p.as_ref())
-    }
-}
-
-impl Drop for QuicConn {
-    fn drop(&mut self) {
-        trace!("Close {}", self);
     }
 }
 
